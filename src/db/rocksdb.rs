@@ -19,10 +19,22 @@ pub struct RocksDb {
 
 impl RocksDb {
     /// Creates new instance with given path
-    pub fn with_path<P: AsRef<Path>>(path: P) -> Self {
+    pub fn with_path(path: impl AsRef<Path>) -> Self {
+        Self::with_options(path, |_| {})
+    }
+
+    /// Creates new instance with given path and ability to additionally configure options
+    pub fn with_options(path: impl AsRef<Path>, configure_options: impl Fn(&mut Options)) -> Self {
         let pathbuf = path.as_ref().to_path_buf();
-        RocksDb {
-            db: Arc::new(Some(DB::open_default(path)
+
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.set_max_total_wal_size(1024 * 1024 * 1024);
+
+        configure_options(&mut options);
+
+        Self {
+            db: Arc::new(Some(DB::open(&options, path)
                 .expect("Cannot open DB"))),
             path: pathbuf
         }
@@ -48,7 +60,7 @@ impl Kvc for RocksDb {
             .ok_or(StorageError::HasActiveTransactions)?
             .is_some()
         {
-            std::mem::replace(&mut self.db, Arc::new(None));
+            self.db = Arc::new(None)
         }
 
         Ok(DB::destroy(&Options::default(), &self.path)?)
@@ -60,7 +72,7 @@ impl<K: DbKey> KvcReadable<K> for RocksDb {
     fn get(&self, key: &K) -> Result<DbSlice> {
         self.db()?.get_pinned(key.key())?
             .map(|value| value.into())
-            .ok_or(StorageError::KeyNotFound(hex::encode(key.key())).into())
+            .ok_or_else(|| StorageError::KeyNotFound(hex::encode(key.key())).into())
     }
 
     fn contains(&self, key: &K) -> Result<bool> {
@@ -121,7 +133,7 @@ impl<K: DbKey> KvcReadable<K> for RocksDbSnapshot<'_> {
     fn get(&self, key: &K) -> Result<DbSlice> {
         self.0.get(key.key())?
             .map(|value| value.into())
-            .ok_or(StorageError::KeyNotFound(hex::encode(key.key())).into())
+            .ok_or_else(|| StorageError::KeyNotFound(hex::encode(key.key())).into())
     }
 
     fn contains(&self, key: &K) -> Result<bool> {
@@ -163,19 +175,19 @@ impl RocksDbTransaction {
 }
 
 impl<K: DbKey> KvcTransaction<K> for RocksDbTransaction {
-    fn put(&self, key: &K, value: &[u8]) -> Result<()> {
-        self.batch.lock().unwrap().put(key.key(), value)
-            .map_err(|err| err.into())
+    fn put(&self, key: &K, value: &[u8]) {
+        self.batch.lock().unwrap()
+            .put(key.key(), value);
     }
 
-    fn delete(&self, key: &K) -> Result<()> {
-        self.batch.lock().unwrap().delete(key.key())
-            .map_err(|err| err.into())
+    fn delete(&self, key: &K) {
+        self.batch.lock().unwrap()
+            .delete(key.key());
     }
 
-    fn clear(&self) -> Result<()> {
-        self.batch.lock().unwrap().clear()
-            .map_err(|err| err.into())
+    fn clear(&self) {
+        self.batch.lock().unwrap()
+            .clear();
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
@@ -190,9 +202,5 @@ impl<K: DbKey> KvcTransaction<K> for RocksDbTransaction {
 
     fn len(&self) -> usize {
         self.batch.lock().unwrap().len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.batch.lock().unwrap().is_empty()
     }
 }

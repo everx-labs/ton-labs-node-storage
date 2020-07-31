@@ -1,13 +1,15 @@
 use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use fnv::FnvHashMap;
 
-use ton_types::{Cell, CellImpl, Result};
+use ton_types::{Cell, Result};
 
 use crate::cell_db::CellDb;
 use crate::types::{CellId, Reference, StorageCell};
+use crate::db::traits::KvcTransaction;
 
 #[derive(Debug)]
 pub struct DynamicBocDb {
@@ -23,7 +25,7 @@ impl DynamicBocDb {
     }
 
     /// Constructs new instance using RocksDB with given path
-    pub fn with_path(path: &str) -> Self {
+    pub fn with_path<P: AsRef<Path>>(path: P) -> Self {
         Self::with_db(CellDb::with_path(path))
     }
 
@@ -41,34 +43,18 @@ impl DynamicBocDb {
     }
 
     /// Converts tree of cells into DynamicBoc
-    pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: Cell) -> Result<(Cell, usize)> {
-        let mut added = Vec::new();
-        let gc_gen = self.gc_gen.load(Ordering::SeqCst);
-        let storage_cell = match self.load_tree_of_cells_recursive(
-            root_cell.clone(),
-            Arc::clone(&self.cells),
-            Arc::clone(&self.db),
-            gc_gen,
-            &mut added)?
-        {
-            Reference::Loaded(storage_cell) => storage_cell,
-            Reference::NeedToLoad(_) => Arc::new(
-                StorageCell::from_single_cell(
-                    root_cell,
-                    Arc::clone(self),
-                    gc_gen
-                )?
-            ),
-        };
-
+    pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: Cell) -> Result<usize> {
         let transaction = self.db.begin_transaction()?;
-        for cell in added {
-            CellDb::put_cell(&*transaction, &cell.id(), &*cell)?;
-        }
+
+        self.save_tree_of_cells_recursive(
+            root_cell.clone(),
+            Arc::clone(&self.db),
+            &transaction)?;
+
         let written_count = transaction.len();
         transaction.commit()?;
 
-        Ok((Cell::with_cell_impl_arc(storage_cell as Arc<dyn CellImpl>), written_count))
+        Ok(written_count)
     }
 
     /// Gets root cell from key-value storage
@@ -110,58 +96,33 @@ impl DynamicBocDb {
         result
     }
 
-    fn load_tree_of_cells_recursive(
+    fn save_tree_of_cells_recursive(
         self: &Arc<Self>,
         cell: Cell,
-        cells: Arc<Mutex<FnvHashMap<CellId, Weak<StorageCell>>>>,
         cell_db: Arc<CellDb>,
-        gc_gen: u32,
-        added: &mut Vec<Arc<StorageCell>>
-    ) -> Result<Reference> {
+        transaction: &Box<dyn KvcTransaction<CellId>>
+    ) -> Result<()> {
         let cell_id = CellId::new(cell.repr_hash());
-        let cell_opt = cells.lock().unwrap()
-            .get(&cell_id)
-            .and_then(|cell| {
-                Weak::upgrade(&cell)
-            });
-
-        if let Some(cell) = cell_opt {
-            cell.mark_gc_gen(self.gc_generation())?;
-            return Ok(Reference::Loaded(cell));
-        }
-
         if cell_db.contains(&cell_id)? {
-            return Ok(Reference::NeedToLoad(cell_id.into()));
+            return Ok(());
         }
 
         let mut references = Vec::with_capacity(cell.references_count());
         for i in 0..cell.references_count() {
-            references.push(
-                self.load_tree_of_cells_recursive(
-                    cell.reference(i)?,
-                    Arc::clone(&cells),
-                    Arc::clone(&cell_db),
-                    gc_gen,
-                    added
-                )?
-            );
+            references.push(Reference::NeedToLoad(cell.reference(i)?.repr_hash()));
         }
 
-        let storage_cell = Arc::new(
-            StorageCell::with_params(
-                cell.cell_data().clone(),
-                references,
-                Arc::clone(self),
-                gc_gen
-            )
-        );
+        CellDb::put_cell(transaction.as_ref(), &cell_id, cell.clone())?;
 
-        cells.lock().unwrap()
-            .insert(cell_id.clone(), Arc::downgrade(&storage_cell));
+        for i in 0..cell.references_count() {
+            self.save_tree_of_cells_recursive(
+                cell.reference(i)?,
+                Arc::clone(&cell_db),
+                transaction
+            )?;
+        }
 
-        added.push(Arc::clone(&storage_cell));
-
-        Ok(Reference::Loaded(storage_cell))
+        Ok(())
     }
 }
 

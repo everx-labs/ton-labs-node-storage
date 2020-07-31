@@ -56,7 +56,7 @@ impl Kvc for MemoryDb {
             .ok_or(StorageError::HasActiveTransactions)?
             .is_some()
         {
-            std::mem::replace(&mut self.map, Arc::new(None));
+            self.map = Arc::new(None);
         }
 
         Ok(())
@@ -68,7 +68,7 @@ impl<K: DbKey> KvcReadable<K> for MemoryDb {
     fn get(&self, key: &K) -> Result<DbSlice> {
         self.map()?
             .lock().unwrap().get(key.key())
-            .ok_or(StorageError::KeyNotFound(hex::encode(key.key())).into())
+            .ok_or_else(|| StorageError::KeyNotFound(hex::encode(key.key())).into())
             .map(|vec| DbSlice::from(vec.clone()))
     }
 
@@ -153,7 +153,7 @@ impl MemoryDbTransaction {
 }
 
 impl<K: DbKey> KvcTransaction<K> for MemoryDbTransaction {
-    fn put(&self, key: &K, value: &[u8]) -> Result<()> {
+    fn put(&self, key: &K, value: &[u8]) {
         self.pending.lock().unwrap().push(
             PendingOperation::Put(
                 Pair {
@@ -162,18 +162,16 @@ impl<K: DbKey> KvcTransaction<K> for MemoryDbTransaction {
                 }
             )
         );
-        Ok(())
     }
 
-    fn delete(&self, key: &K) -> Result<()> {
+    fn delete(&self, key: &K) {
         self.pending.lock().unwrap().push(
             PendingOperation::Delete(key.key().to_vec())
         );
-        Ok(())
     }
 
-    fn clear(&self) -> Result<()> {
-        Ok(self.pending.lock().unwrap().clear())
+    fn clear(&self) {
+        self.pending.lock().unwrap().clear();
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
