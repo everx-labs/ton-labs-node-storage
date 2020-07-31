@@ -16,6 +16,7 @@ use crate::db::rocksdb::RocksDb;
 use crate::db::traits::{DbKey, KvcTransaction, KvcWriteable};
 use crate::dynamic_boc_db::DynamicBocDb;
 use crate::types::{BlockId, CellId, StorageCell};
+use std::path::Path;
 
 pub struct ShardStateDb {
     shardstate_db: Arc<dyn KvcWriteable<BlockId>>,
@@ -71,7 +72,7 @@ impl ShardStateDb {
     }
 
     /// Constructs new instance using RocksDB with given paths
-    pub fn with_paths(shardstate_db_path: &str, cell_db_path: &str) -> Self {
+    pub fn with_paths<P1: AsRef<Path>, P2: AsRef<Path>>(shardstate_db_path: P1, cell_db_path: P2) -> Self {
         Self::with_dbs(
             Arc::new(RocksDb::with_path(shardstate_db_path)),
             CellDb::with_path(cell_db_path),
@@ -104,9 +105,9 @@ impl ShardStateDb {
     /// Stores cells from given tree which don't exist in the storage.
     /// Returns root cell which is implemented as StorageCell.
     /// So after store() origin shard state's cells might be dropped.
-    pub fn put(&self, id: &BlockId, state_root: Cell) -> Result<Cell> {
+    pub fn put(&self, id: &BlockId, state_root: Cell) -> Result<()> {
         let cell_id = CellId::from(state_root.repr_hash());
-        let (result_cell, _written_count) = self.dynamic_boc_db.save_as_dynamic_boc(state_root)?;
+        self.dynamic_boc_db.save_as_dynamic_boc(state_root)?;
 
         let block_id_ext = id.block_id_ext().clone();
         let db_entry = DbEntry::with_params(cell_id, block_id_ext);
@@ -116,7 +117,7 @@ impl ShardStateDb {
 
         self.shardstate_db.put(id, buf.as_slice())?;
 
-        Ok(result_cell)
+        Ok(())
     }
 
     /// Loads previously stored root cell
@@ -294,7 +295,7 @@ impl GC {
         }
 
         if root.gc_gen().load(Ordering::SeqCst) < gc_gen {
-            transaction.delete(&CellId::new(root.repr_hash()))?;
+            transaction.delete(&CellId::new(root.repr_hash()));
         }
 
         Ok(())

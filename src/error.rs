@@ -1,4 +1,4 @@
-#[derive(Debug, failure::Fail)]
+#[derive(Debug, PartialEq, failure::Fail)]
 pub enum StorageError {
     /// Key not found  
     #[fail(display = "Key not found: {}", 0)]
@@ -15,4 +15,8 @@ pub enum StorageError {
     /// One or more active transactions exist
     #[fail(display = "Operation is not permitted while one or more active transactions exist")]
     HasActiveTransactions,
+
+    /// Reading out of buffer range
+    #[fail(display = "Reading out of buffer range")]
+    OutOfRange,
 }

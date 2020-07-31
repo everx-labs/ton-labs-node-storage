@@ -15,7 +15,7 @@ macro_rules! base_impl {
             }
 
             /// Constructs new instance using RocksDB with given path
-            pub fn with_path(path: &str) -> Self {
+            pub fn with_path<P: AsRef<std::path::Path>>(path: P) -> Self {
                 Self {
                     db: Box::new(crate::db::rocksdb::RocksDb::with_path(path))
                 }

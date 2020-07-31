@@ -1,11 +1,5 @@
-use std::convert::{TryFrom, TryInto};
-use std::fmt::{Display, Formatter};
-
+use std::fmt::{Display, Formatter};  
 use sha2::{Digest, Sha256};
-use ton_api::ton::ton_node::blockidext::BlockIdExt;
-
-use ton_types::Result;
-
 use crate::db::traits::DbKey;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,22 +31,6 @@ impl From<ton_block::BlockIdExt> for BlockId {
 impl From<&ton_block::BlockIdExt> for BlockId {
     fn from(block_id_ext: &ton_block::BlockIdExt) -> Self {
         Self::from(block_id_ext.clone())
-    }
-}
-
-impl TryFrom<&BlockIdExt> for BlockId {
-    type Error = failure::Error;
-
-    fn try_from(block_id_ext: &BlockIdExt) -> Result<Self> {
-        Ok(Self::from(&block_id_ext.try_into()?))
-    }
-}
-
-impl TryFrom<BlockIdExt> for BlockId {
-    type Error = failure::Error;
-
-    fn try_from(block_id_ext: BlockIdExt) -> Result<Self> {
-        Self::try_from(&block_id_ext)
     }
 }
 

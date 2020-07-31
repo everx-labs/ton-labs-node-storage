@@ -8,6 +8,7 @@ pub mod block_info_db;
 pub mod shardstate_db;
 pub mod cell_db;
 pub mod catchain_persistent_db;
+pub mod shardstate_persistent_db;
 
 mod macros;
 

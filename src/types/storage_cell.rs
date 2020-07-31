@@ -1,9 +1,8 @@
-use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 
 use ton_types::{Cell, CellData, CellImpl, CellType, LevelMask, MAX_LEVEL, Result};
-use ton_types::types::{ByteOrderRead, UInt256};
+use ton_types::types::UInt256;
 
 use crate::{
     dynamic_boc_db::DynamicBocDb, types::{CellId, Reference}
@@ -76,47 +75,22 @@ impl StorageCell {
         Ok(storage_cell)
     }
 
-    pub(crate) fn mark_gc_gen(self: &Arc<Self>, gc_gen: u32) -> Result<()> {
-        if self.gc_gen().load(Ordering::SeqCst) >= gc_gen {
-            return Ok(());
-        }
-
-        self.gc_gen().store(gc_gen, Ordering::SeqCst);
-
-        for i in 0..self.references_count() {
-            if let Some(Reference::Loaded(ref cell)) = self.references.lock().unwrap().get(i) {
-                cell.mark_gc_gen(gc_gen)?;
-            }
-        }
-
-        Ok(())
-    }
-    
-    /// Binary serialization of cell data
-    pub fn serialize<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
-        assert!(self.references.lock().unwrap().len() < 5);
-
-        self.cell_data.serialize(writer)?;
-        writer.write(&[self.references.lock().unwrap().len() as u8])?;
-
-        for reference in &*self.references.lock().unwrap() {
-            writer.write(reference.hash().as_slice())?;
-        }
-        Ok(())
-    }
-
-    /// Binary deserialization of cell data
-    pub fn deserialize<T: Read>(reader: &mut T, boc_db: Arc<DynamicBocDb>) -> std::io::Result<Self> {
-        let cell_data = CellData::deserialize(reader)?;
-        let reference_count = reader.read_byte()?;
-        let mut references = Vec::with_capacity(reference_count as usize);
-        for _ in 0..reference_count {
-            let hash = UInt256::from(reader.read_u256()?);
-            references.push(Reference::NeedToLoad(hash));
-        }
-
-        Ok(Self::with_params(cell_data, references, boc_db, 0))
-    }
+    // TODO: Fix GC
+    // pub(crate) fn mark_gc_gen(self: &Arc<Self>, gc_gen: u32) -> Result<()> {
+    //     if self.gc_gen().load(Ordering::SeqCst) >= gc_gen {
+    //         return Ok(());
+    //     }
+    //
+    //     self.gc_gen().store(gc_gen, Ordering::SeqCst);
+    //
+    //     for i in 0..self.references_count() {
+    //         if let Some(Reference::Loaded(ref cell)) = self.references.lock().unwrap().get(i) {
+    //             cell.mark_gc_gen(gc_gen)?;
+    //         }
+    //     }
+    //
+    //     Ok(())
+    // }
 }
 
 impl CellImpl for StorageCell {
