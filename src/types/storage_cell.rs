@@ -1,5 +1,4 @@
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, RwLock};
 
 use ton_types::{Cell, CellData, CellImpl, CellType, LevelMask, MAX_LEVEL, Result};
 use ton_types::types::UInt256;
@@ -11,9 +10,8 @@ use crate::{
 #[derive(Debug)]
 pub struct StorageCell {
     cell_data: CellData,
-    references: Mutex<Vec<Reference>>,
+    references: RwLock<Vec<Reference>>,
     boc_db: Arc<DynamicBocDb>,
-    gc_gen: AtomicU32,
 }
 
 /// Represents Cell for storing in persistent storage
@@ -23,28 +21,12 @@ impl StorageCell {
         cell_data: CellData,
         references: Vec<Reference>,
         boc_db: Arc<DynamicBocDb>,
-        gc_gen: u32,
     ) -> Self {
         Self {
             cell_data,
-            references: Mutex::new(references),
+            references: RwLock::new(references),
             boc_db,
-            gc_gen: AtomicU32::new(gc_gen),
         }
-    }
-
-    /// Constructs StorageCell from Cell. All references are created in NeedToLoad state.
-    pub fn from_single_cell(cell: Cell, boc_db: Arc<DynamicBocDb>, gc_gen: u32,) -> Result<Self> {
-        let mut references = Vec::with_capacity(cell.references_count());
-        for i in 0..cell.references_count() {
-            references.push(
-                Reference::NeedToLoad(
-                    cell.reference(i)?.repr_hash()
-                )
-            )
-        }
-
-        Ok(Self::with_params(cell.cell_data().clone(), references, boc_db, gc_gen))
     }
 
     /// Gets cell's id
@@ -57,40 +39,19 @@ impl StorageCell {
         self.hash(MAX_LEVEL as usize)
     }
 
-    /// Gets cell's garbage collection generation
-    pub(crate) fn gc_gen(&self) -> &AtomicU32 {
-        &self.gc_gen
-    }
-
     pub(crate) fn reference(&self, index: usize) -> Result<Arc<StorageCell>> {
-        let hash = match &self.references.lock().unwrap()[index] {
+        let hash = match &self.references.read().expect("Poisoned RwLock")[index]
+        {
             Reference::Loaded(cell) => return Ok(Arc::clone(cell)),
             Reference::NeedToLoad(hash) => hash.clone()
         };
 
         let cell_id = CellId::from(hash.clone());
         let storage_cell = self.boc_db.load_cell(&cell_id)?;
-        self.references.lock().unwrap()[index] = Reference::Loaded(Arc::clone(&storage_cell));
+        self.references.write().expect("Poisoned RwLock")[index] = Reference::Loaded(Arc::clone(&storage_cell));
 
         Ok(storage_cell)
     }
-
-    // TODO: Fix GC
-    // pub(crate) fn mark_gc_gen(self: &Arc<Self>, gc_gen: u32) -> Result<()> {
-    //     if self.gc_gen().load(Ordering::SeqCst) >= gc_gen {
-    //         return Ok(());
-    //     }
-    //
-    //     self.gc_gen().store(gc_gen, Ordering::SeqCst);
-    //
-    //     for i in 0..self.references_count() {
-    //         if let Some(Reference::Loaded(ref cell)) = self.references.lock().unwrap().get(i) {
-    //             cell.mark_gc_gen(gc_gen)?;
-    //         }
-    //     }
-    //
-    //     Ok(())
-    // }
 }
 
 impl CellImpl for StorageCell {
@@ -107,7 +68,7 @@ impl CellImpl for StorageCell {
     }
 
     fn references_count(&self) -> usize {
-        self.references.lock().unwrap().len()
+        self.references.read().expect("Poisoned RwLock").len()
     }
 
     fn reference(&self, index: usize) -> Result<Cell> {
@@ -146,14 +107,21 @@ fn references_hashes_equal(left: &Vec<Reference>, right: &Vec<Reference>) -> boo
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
-        self.boc_db.cells_map().lock().unwrap().remove(&self.id());
+        self.boc_db.cells_map().write()
+            .expect("Poisoned RwLock")
+            .remove(&self.id());
     }
 }
 
 impl PartialEq for StorageCell {
     fn eq(&self, other: &Self) -> bool {
-        self.cell_data == other.cell_data
-            && self.references.lock().unwrap().len() == other.references.lock().unwrap().len()
-        && references_hashes_equal(&self.references.lock().unwrap(), &other.references.lock().unwrap())
+        if self.cell_data != other.cell_data {
+            return false;
+        }
+
+        let self_guard = self.references.read().expect("Poisoned RwLock");
+        let other_guard = other.references.read().expect("Poisoned RwLock");
+        self_guard.len() == other_guard.len()
+            && references_hashes_equal(&self_guard, &other_guard)
     }
 }

@@ -1,8 +1,8 @@
 #[derive(Debug, PartialEq, failure::Fail)]
 pub enum StorageError {
     /// Key not found  
-    #[fail(display = "Key not found: {}", 0)]
-    KeyNotFound(String),
+    #[fail(display = "Key not found: {}({})", 0, 1)]
+    KeyNotFound(&'static str, String),
 
     /// Reference not loaded
     #[fail(display = "Reference not loaded. Need to load reference.")]

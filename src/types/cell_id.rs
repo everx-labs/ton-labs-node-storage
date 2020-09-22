@@ -8,7 +8,7 @@ pub struct CellId {
 }
 
 impl CellId {
-    pub fn new(hash: UInt256) -> Self {
+    pub const fn new(hash: UInt256) -> Self {
         Self { hash }
     }
 }
@@ -26,6 +26,10 @@ impl Debug for CellId {
 }
 
 impl DbKey for CellId {
+    fn key_name(&self) -> &'static str {
+        "CellId"
+    }
+
     fn key(&self) -> &[u8] {
         self.hash.as_slice()
     }

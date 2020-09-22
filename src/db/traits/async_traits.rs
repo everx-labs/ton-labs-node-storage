@@ -24,6 +24,9 @@ pub trait KvcAsync: Debug + Send + Sync {
 /// Trait for readable key-value collections
 #[async_trait]
 pub trait KvcReadableAsync<K: DbKey>: KvcAsync {
+    /// Tries to get value from collection by the key; returns Ok(None) if key not found
+    async fn try_get(&self, key: &K) -> Result<Option<DbSlice>>;
+
     /// Gets value from collection by the key
     async fn get(&self, key: &K) -> Result<DbSlice>;
 

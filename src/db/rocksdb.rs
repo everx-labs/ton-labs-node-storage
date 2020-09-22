@@ -60,7 +60,7 @@ impl Kvc for RocksDb {
             .ok_or(StorageError::HasActiveTransactions)?
             .is_some()
         {
-            self.db = Arc::new(None)
+            self.db = Arc::new(None);
         }
 
         Ok(DB::destroy(&Options::default(), &self.path)?)
@@ -68,17 +68,10 @@ impl Kvc for RocksDb {
 }
 
 /// Implementation of readable key-value collection for RocksDB. Actual implementation is blocking.
-impl<K: DbKey> KvcReadable<K> for RocksDb {
-    fn get(&self, key: &K) -> Result<DbSlice> {
-        self.db()?.get_pinned(key.key())?
-            .map(|value| value.into())
-            .ok_or_else(|| StorageError::KeyNotFound(hex::encode(key.key())).into())
-    }
-
-    fn contains(&self, key: &K) -> Result<bool> {
-        self.db()?.get_pinned(key.key())
-            .map(|value| value.is_some())
-            .map_err(|err| err.into())
+impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
+    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
+        Ok(self.db()?.get_pinned(key.key())?
+            .map(|value| value.into()))
     }
 
     fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
@@ -92,7 +85,7 @@ impl<K: DbKey> KvcReadable<K> for RocksDb {
 }
 
 /// Implementation of writable key-value collection for RocksDB. Actual implementation is blocking.
-impl<K: DbKey> KvcWriteable<K> for RocksDb {
+impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDb {
     fn put(&self, key: &K, value: &[u8]) -> Result<()> {
         self.db()?.put(key.key(), value)
             .map_err(|err| err.into())
@@ -105,7 +98,7 @@ impl<K: DbKey> KvcWriteable<K> for RocksDb {
 }
 
 /// Implementation of support for take snapshots for RocksDB.
-impl<K: DbKey> KvcSnapshotable<K> for RocksDb {
+impl<K: DbKey + Send + Sync> KvcSnapshotable<K> for RocksDb {
     fn snapshot<'db>(&'db self) -> Result<Arc<dyn KvcReadable<K> + 'db>> {
         Ok(Arc::new(RocksDbSnapshot(self.db()?.snapshot())))
     }
@@ -129,17 +122,10 @@ impl Kvc for RocksDbSnapshot<'_> {
     }
 }
 
-impl<K: DbKey> KvcReadable<K> for RocksDbSnapshot<'_> {
-    fn get(&self, key: &K) -> Result<DbSlice> {
-        self.0.get(key.key())?
-            .map(|value| value.into())
-            .ok_or_else(|| StorageError::KeyNotFound(hex::encode(key.key())).into())
-    }
-
-    fn contains(&self, key: &K) -> Result<bool> {
-        self.0.get(key.key())
-            .map(|value| value.is_some())
-            .map_err(|err| err.into())
+impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbSnapshot<'_> {
+    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
+        Ok(self.0.get(key.key())?
+            .map(|value| value.into()))
     }
 
     fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
@@ -153,7 +139,7 @@ impl<K: DbKey> KvcReadable<K> for RocksDbSnapshot<'_> {
 }
 
 /// Implementation of transaction support for key-value collection for RocksDB.
-impl<K: DbKey> KvcTransactional<K> for RocksDb {
+impl<K: DbKey + Send + Sync> KvcTransactional<K> for RocksDb {
     fn begin_transaction(&self) -> Result<Box<dyn KvcTransaction<K>>> {
         Ok(Box::new(RocksDbTransaction::new(Arc::clone(&self.db))))
     }
@@ -174,7 +160,7 @@ impl RocksDbTransaction {
     }
 }
 
-impl<K: DbKey> KvcTransaction<K> for RocksDbTransaction {
+impl<K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
     fn put(&self, key: &K, value: &[u8]) {
         self.batch.lock().unwrap()
             .put(key.key(), value);

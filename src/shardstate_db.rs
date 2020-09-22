@@ -1,25 +1,26 @@
 use std::io::{Cursor, Read, Write};
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use fnv::FnvHashSet;
 
-use ton_block::{BlockIdExt, ShardIdent, UnixTime32};
-use ton_types::{Cell, CellImpl, Result};
-use ton_types::types::{ByteOrderRead, UInt256};
+use ton_block::{BlockIdExt, UnixTime32};
+use ton_types::{Cell, Result};
 
-use crate::block_info_db::BlockInfoDb;
+use crate::block_handle_db::BlockHandleDb;
 use crate::cell_db::CellDb;
 use crate::db::memorydb::MemoryDb;
 use crate::db::rocksdb::RocksDb;
-use crate::db::traits::{DbKey, KvcTransaction, KvcWriteable};
+use crate::db::traits::{DbKey, KvcSnapshotable};
 use crate::dynamic_boc_db::DynamicBocDb;
-use crate::types::{BlockId, CellId, StorageCell};
-use std::path::Path;
+use crate::dynamic_boc_diff_writer::DynamicBocDiffWriter;
+use crate::traits::Serializable;
+use crate::types::{BlockId, CellId, Reference};
 
 pub struct ShardStateDb {
-    shardstate_db: Arc<dyn KvcWriteable<BlockId>>,
+    shardstate_db: Arc<dyn KvcSnapshotable<BlockId>>,
     dynamic_boc_db: Arc<DynamicBocDb>,
 }
 
@@ -32,34 +33,19 @@ impl DbEntry {
     pub fn with_params(cell_id: CellId, block_id_ext: BlockIdExt) -> Self {
         Self { cell_id, block_id_ext }
     }
+}
 
-    pub fn serialize<T: Write>(&self, writer: &mut T) -> Result<()> {
+impl Serializable for DbEntry {
+    fn serialize<T: Write>(&self, writer: &mut T) -> Result<()> {
         writer.write_all(self.cell_id.key())?;
-
-        // TODO: Implement (de)serialization into BlockIdExt:
-        writer.write_i32::<LittleEndian>(self.block_id_ext.shard_id.workchain_id())?;
-        writer.write_u64::<LittleEndian>(self.block_id_ext.shard_id.shard_prefix_with_tag())?;
-        writer.write_u32::<LittleEndian>(self.block_id_ext.seq_no())?;
-        writer.write_all(self.block_id_ext.root_hash().as_ref())?;
-        writer.write_all(self.block_id_ext.file_hash().as_ref())?;
-
-        Ok(())
+        self.block_id_ext.serialize(writer)
     }
 
-    pub fn deserialize<T: Read>(reader: &mut T) -> Result<Self> {
+    fn deserialize<T: Read>(reader: &mut T) -> Result<Self> {
         let mut buf = [0; 32];
         reader.read_exact(&mut buf)?;
         let cell_id = CellId::new(buf.into());
-
-        // TODO: Implement (de)serialization into BlockIdExt:
-        let workchain_id = reader.read_i32::<LittleEndian>()?;
-        let shard_prefix_tagged = reader.read_u64::<LittleEndian>()?;
-        let seq_no = reader.read_u32::<LittleEndian>()?;
-        let root_hash = UInt256::from(reader.read_u256()?);
-        let file_hash = UInt256::from(reader.read_u256()?);
-
-        let shard_id = ShardIdent::with_tagged_prefix(workchain_id, shard_prefix_tagged)?;
-        let block_id_ext = BlockIdExt::with_params(shard_id, seq_no, root_hash, file_hash);
+        let block_id_ext = BlockIdExt::deserialize(reader)?;
 
         Ok(Self { cell_id, block_id_ext })
     }
@@ -80,7 +66,7 @@ impl ShardStateDb {
     }
 
     /// Constructs new instance using given key-value collection implementations
-    fn with_dbs(shardstate_db: Arc<dyn KvcWriteable<BlockId>>, cell_db: CellDb) -> Self {
+    fn with_dbs(shardstate_db: Arc<dyn KvcSnapshotable<BlockId>>, cell_db: CellDb) -> Self {
         Self {
             shardstate_db,
             dynamic_boc_db: Arc::new(DynamicBocDb::with_db(cell_db)),
@@ -88,7 +74,7 @@ impl ShardStateDb {
     }
 
     /// Returns reference to shardstates database
-    pub fn shardstate_db(&self) -> Arc<dyn KvcWriteable<BlockId>> {
+    pub fn shardstate_db(&self) -> Arc<dyn KvcSnapshotable<BlockId>> {
         Arc::clone(&self.shardstate_db)
     }
 
@@ -122,8 +108,7 @@ impl ShardStateDb {
 
     /// Loads previously stored root cell
     pub fn get(&self, id: &BlockId) -> Result<Cell> {
-        let entry = self.shardstate_db.get(id)?;
-        let db_entry = DbEntry::deserialize(&mut Cursor::new(entry.as_ref()))?;
+        let db_entry = DbEntry::from_slice(self.shardstate_db.get(id)?.as_ref())?;
         let root_cell = self.dynamic_boc_db.load_dynamic_boc(&db_entry.cell_id)?;
 
         Ok(root_cell)
@@ -131,17 +116,17 @@ impl ShardStateDb {
 }
 
 pub(crate) trait AllowStateGcResolver: Send + Sync {
-    fn allow_state_gc(&self, block_id_ext: &BlockIdExt, gc_utime: u32) -> Result<bool>;
+    fn allow_state_gc(&self, block_id_ext: &BlockIdExt, gc_utime: UnixTime32) -> Result<bool>;
 }
 
 struct AllowStateGcResolverImpl {
     // dynamic_boc_db: Arc<DynamicBocDb>,
-    block_handle_db: Arc<BlockInfoDb>,
+    block_handle_db: Arc<BlockHandleDb>,
     shard_state_ttl: AtomicU32,
 }
 
 impl AllowStateGcResolverImpl {
-    pub fn with_data(/*dynamic_boc_db: Arc<DynamicBocDb>,*/ block_handle_db: Arc<BlockInfoDb>) -> Self {
+    pub fn with_data(/*dynamic_boc_db: Arc<DynamicBocDb>,*/ block_handle_db: Arc<BlockHandleDb>) -> Self {
         Self {
             // dynamic_boc_db,
             block_handle_db,
@@ -161,30 +146,30 @@ impl AllowStateGcResolverImpl {
 }
 
 impl AllowStateGcResolver for AllowStateGcResolverImpl {
-    fn allow_state_gc(&self, block_id_ext: &BlockIdExt, gc_utime: u32) -> Result<bool> {
+    fn allow_state_gc(&self, block_id_ext: &BlockIdExt, gc_utime: UnixTime32) -> Result<bool> {
         let block_id = BlockId::from(block_id_ext);
-        let block_meta = self.block_handle_db.get_block_meta(&block_id)?;
+        let block_meta = self.block_handle_db.get(&block_id)?;
 
         // TODO: Implement more sophisticated logic of decision shard state garbage collecting
 
-        Ok(block_meta.gen_utime().load(Ordering::SeqCst) + self.shard_state_ttl() < gc_utime)
+        Ok(block_meta.gen_utime().load(Ordering::SeqCst) + self.shard_state_ttl() < gc_utime.0)
     }
 }
 
 pub struct GC {
-    shardstate_db: Arc<dyn KvcWriteable<BlockId>>,
+    shardstate_db: Arc<dyn KvcSnapshotable<BlockId>>,
     dynamic_boc_db: Arc<DynamicBocDb>,
     allow_state_gc_resolver: Arc<dyn AllowStateGcResolver>,
 }
 
 impl GC {
-    pub fn new(db: &ShardStateDb, block_handle_db: Arc<BlockInfoDb>) -> Self {
+    pub fn new(db: &ShardStateDb, block_handle_db: Arc<BlockHandleDb>) -> Self {
         Self::with_data(
             db.shardstate_db(),
             db.dynamic_boc_db(),
             Arc::new(
                 AllowStateGcResolverImpl::with_data(
-                    /*db.dynamic_boc_db(),*/
+                    // db.dynamic_boc_db(),
                     block_handle_db
                 )
             )
@@ -192,7 +177,7 @@ impl GC {
     }
 
     pub(crate) fn with_data(
-        shardstate_db: Arc<dyn KvcWriteable<BlockId>>,
+        shardstate_db: Arc<dyn KvcSnapshotable<BlockId>>,
         dynamic_boc_db: Arc<DynamicBocDb>,
         allow_state_gc_resolver: Arc<dyn AllowStateGcResolver>
     ) -> Self {
@@ -204,28 +189,23 @@ impl GC {
     }
 
     pub fn collect(&self) -> Result<usize> {
-        let gc_gen = self.dynamic_boc_db.new_gc_generation();
-        let gc_utime = UnixTime32::now();
-
-        let (marked, to_sweep) = self.mark(gc_gen, gc_utime.0)?;
-        let result = self.sweep(to_sweep, gc_gen);
-
-        // We're handling and dropping marked trees only after sweep operation in order to prevent
-        // dropping of marked cells which will make them removable by the sweeper
-        drop(marked);
+        let (marked, to_sweep) = self.mark(UnixTime32::now())?;
+        let result = self.sweep(to_sweep, marked);
 
         result
     }
 
-    fn mark(&self, gc_gen: u32, gc_utime: u32) -> Result<(Vec<Arc<StorageCell>>, Vec<(BlockId, CellId)>)> {
+    fn mark(&self, gc_utime: UnixTime32) -> Result<(FnvHashSet<CellId>, Vec<(BlockId, CellId)>)> {
         let mut to_mark = Vec::new();
         let mut to_sweep = Vec::new();
-        self.shardstate_db.for_each(&mut |_key, value| {
-            let mut cursor = Cursor::new(value);
-            let db_entry = DbEntry::deserialize(&mut cursor)?;
+        let shardstates = self.shardstate_db.snapshot()?;
+        shardstates.for_each(&mut |_key, value| {
+            let db_entry = DbEntry::from_slice(value)?;
             let cell_id = db_entry.cell_id;
             let block_id_ext = db_entry.block_id_ext;
-            if (!self.dynamic_boc_db.cells_map().lock().unwrap().contains_key(&cell_id))
+            if (!self.dynamic_boc_db.cells_map().read()
+                .expect("Poisoned RwLock")
+                .contains_key(&cell_id))
                 && self.allow_state_gc_resolver.allow_state_gc(&block_id_ext, gc_utime)?
             {
                 let block_id = BlockId::from(block_id_ext);
@@ -237,67 +217,72 @@ impl GC {
             Ok(true)
         })?;
 
-        let mut marked = Vec::new();
+        let mut marked = FnvHashSet::default();
         if to_sweep.len() > 0 {
             for cell_id in to_mark {
-                let root_cell = self.dynamic_boc_db.load_cell(&cell_id)?;
-                self.mark_subtree_recursive(Arc::clone(&root_cell), gc_gen)?;
-                marked.push(root_cell);
+                self.mark_subtree_recursive(cell_id, &mut marked)?;
             }
         }
 
         Ok((marked, to_sweep))
     }
 
-    fn mark_subtree_recursive(&self, root: Arc<StorageCell>, gc_gen: u32) -> Result<()> {
-        if root.gc_gen().load(Ordering::SeqCst) >= gc_gen {
+    fn mark_subtree_recursive(&self, cell_id: CellId, marked: &mut FnvHashSet<CellId>) -> Result<()> {
+        if marked.contains(&cell_id) {
             return Ok(());
         }
 
-        root.gc_gen().store(gc_gen, Ordering::SeqCst);
+        let references = self.load_cell_references(&cell_id)?;
+        marked.insert(cell_id);
 
-        for i in 0..root.references_count() {
-            self.mark_subtree_recursive(root.reference(i)?, gc_gen)?;
+        for reference in references {
+            self.mark_subtree_recursive(reference.hash().into(), marked)?;
         }
 
         Ok(())
     }
 
-    fn sweep(&self, to_sweep: Vec<(BlockId, CellId)>, gc_gen: u32) -> Result<usize> {
+    fn sweep(&self, to_sweep: Vec<(BlockId, CellId)>, marked: FnvHashSet<CellId>) -> Result<usize> {
         if to_sweep.len() < 1 {
             return Ok(0);
         }
 
-        let transaction = self.dynamic_boc_db.begin_transaction()?;
+        let diff_writer = self.dynamic_boc_db.diff_factory().construct();
+        let mut deleted_count = 0;
         for (block_id, cell_id) in to_sweep {
-            let root = self.dynamic_boc_db.load_cell(&cell_id)?;
-            self.sweep_cells_recursive(&transaction, root, gc_gen)?;
+            deleted_count += self.sweep_cells_recursive(&diff_writer, cell_id, &marked)?;
             self.shardstate_db.delete(&block_id)?;
         }
-        let delete_count = transaction.len();
-        transaction.commit()?;
+        diff_writer.apply()?;
 
-        Ok(delete_count)
+        Ok(deleted_count)
     }
 
     fn sweep_cells_recursive(
         &self,
-        transaction: &Box<dyn KvcTransaction<CellId>>,
-        root: Arc<StorageCell>,
-        gc_gen: u32
-    ) -> Result<()> {
-        if root.gc_gen().load(Ordering::SeqCst) >= gc_gen {
-            return Ok(());
+        diff_writer: &DynamicBocDiffWriter,
+        cell_id: CellId,
+        marked: &FnvHashSet<CellId>,
+    ) -> Result<usize> {
+        if marked.contains(&cell_id) {
+            return Ok(0);
         }
 
-        for i in 0..root.references_count() {
-            self.sweep_cells_recursive(transaction, root.reference(i)?, gc_gen)?;
+        let mut deleted_count = 0;
+        let references = self.load_cell_references(&cell_id)?;
+        for reference in references {
+            deleted_count += self.sweep_cells_recursive(diff_writer, reference.hash().into(), marked)?;
         }
 
-        if root.gc_gen().load(Ordering::SeqCst) < gc_gen {
-            transaction.delete(&CellId::new(root.repr_hash()));
-        }
+        diff_writer.delete_cell(&cell_id);
+        deleted_count += 1;
 
-        Ok(())
+        Ok(deleted_count)
+    }
+
+    fn load_cell_references(&self, cell_id: &CellId) -> Result<Vec<Reference>> {
+        let slice = self.dynamic_boc_db.cell_db().get(cell_id)?;
+
+        Ok(CellDb::deserialize_cell(slice.as_ref())?.1)
     }
 }

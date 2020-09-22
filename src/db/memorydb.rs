@@ -64,12 +64,12 @@ impl Kvc for MemoryDb {
 }
 
 /// Implementation of readable key-value collection for MemoryDb. Actual implementation is blocking.
-impl<K: DbKey> KvcReadable<K> for MemoryDb {
-    fn get(&self, key: &K) -> Result<DbSlice> {
-        self.map()?
-            .lock().unwrap().get(key.key())
-            .ok_or_else(|| StorageError::KeyNotFound(hex::encode(key.key())).into())
-            .map(|vec| DbSlice::from(vec.clone()))
+impl<K: DbKey + Send + Sync> KvcReadable<K> for MemoryDb {
+    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
+        Ok(self.map()?
+            .lock().unwrap()
+            .get(key.key())
+            .map(|vec| vec.clone().into()))
     }
 
     fn contains(&self, key: &K) -> Result<bool> {
@@ -94,7 +94,7 @@ impl<K: DbKey> KvcReadable<K> for MemoryDb {
 }
 
 /// Implementation of wriatable key-value collection for MemoryDb. Actual implementation is blocking.
-impl<K: DbKey> KvcWriteable<K> for MemoryDb {
+impl<K: DbKey + Send + Sync> KvcWriteable<K> for MemoryDb {
     fn put(&self, key: &K, value: &[u8]) -> Result<()> {
         self.map()?
             .lock().unwrap()
@@ -111,14 +111,14 @@ impl<K: DbKey> KvcWriteable<K> for MemoryDb {
 }
 
 /// Implementation of support for take snapshots for MemoryDb.
-impl<K: DbKey> KvcSnapshotable<K> for MemoryDb {
+impl<K: DbKey + Send + Sync> KvcSnapshotable<K> for MemoryDb {
     fn snapshot<'db>(&'db self) -> Result<Arc<dyn KvcReadable<K> + 'db>> {
         Ok(Arc::new(Self::with_map(self.map()?.lock().unwrap().clone())))
     }
 }
 
 /// Implementation of transaction support for key-value collection for MemoryDb.
-impl<K: DbKey> KvcTransactional<K> for MemoryDb {
+impl<K: DbKey + Send + Sync> KvcTransactional<K> for MemoryDb {
     fn begin_transaction(&self) -> Result<Box<dyn KvcTransaction<K>>> {
         Ok(Box::new(MemoryDbTransaction::new(Arc::clone(&self.map))))
     }
@@ -152,7 +152,7 @@ impl MemoryDbTransaction {
     }
 }
 
-impl<K: DbKey> KvcTransaction<K> for MemoryDbTransaction {
+impl<K: DbKey + Send + Sync> KvcTransaction<K> for MemoryDbTransaction {
     fn put(&self, key: &K, value: &[u8]) {
         self.pending.lock().unwrap().push(
             PendingOperation::Put(
