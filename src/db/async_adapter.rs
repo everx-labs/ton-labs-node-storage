@@ -10,12 +10,12 @@ use crate::types::DbSlice;
 
 /// This facade wraps key-value collections implementing sync traits into async traits
 #[derive(Debug)]
-pub struct KvcWriteableAsyncAdapter<K: DbKey + Debug, T: KvcWriteable<K>> {
+pub struct KvcWriteableAsyncAdapter<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> {
     kvc: T,
     phantom: PhantomData<K>,
 }
 
-impl<K: DbKey + Debug, T: KvcWriteable<K>> KvcWriteableAsyncAdapter<K, T> {
+impl<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> KvcWriteableAsyncAdapter<K, T> {
     pub fn new(kvc: T) -> Self {
         Self { kvc, phantom: PhantomData::default() }
     }
@@ -25,7 +25,7 @@ impl<K: DbKey + Debug, T: KvcWriteable<K>> KvcWriteableAsyncAdapter<K, T> {
     }
 }
 
-impl<K: DbKey + Debug, T: KvcWriteable<K>> Deref for KvcWriteableAsyncAdapter<K, T> {
+impl<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> Deref for KvcWriteableAsyncAdapter<K, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -50,6 +50,10 @@ impl<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> KvcAsync for KvcWriteab
 
 #[async_trait]
 impl<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> KvcReadableAsync<K> for KvcWriteableAsyncAdapter<K, T> {
+    async fn try_get<'a>(&'a self, key: &K) -> Result<Option<DbSlice<'a>>> {
+        self.kvc.try_get(key)
+    }
+
     async fn get<'a>(&'a self, key: &K) -> Result<DbSlice<'a>> {
         self.kvc.get(key)
     }

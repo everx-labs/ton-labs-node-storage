@@ -1,4 +1,4 @@
-use crate::base_impl;
+use crate::db_impl_base;
 use crate::db::traits::KvcWriteable;
 
-base_impl!(NodeStateDb, KvcWriteable, &'static str);
+db_impl_base!(NodeStateDb, KvcWriteable, &'static str);

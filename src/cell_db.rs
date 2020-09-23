@@ -1,20 +1,21 @@
 use std::io::{Cursor, Write};
 use std::sync::Arc;
 
-use ton_types::{ByteOrderRead, Cell, CellData, Result};
+use ton_types::{ByteOrderRead, Cell, CellData, Result, MAX_REFERENCES_COUNT};
 use ton_types::UInt256;
 
-use crate::base_impl;
+use crate::db_impl_base;
 use crate::db::traits::{KvcTransaction, KvcTransactional};
 use crate::dynamic_boc_db::DynamicBocDb;
 use crate::types::{CellId, Reference, StorageCell};
 
-base_impl!(CellDb, KvcTransactional, CellId);
+db_impl_base!(CellDb, KvcTransactional, CellId);
 
 impl CellDb {
     /// Gets cell from key-value storage by cell id
     pub fn get_cell(&self, cell_id: &CellId, boc_db: Arc<DynamicBocDb>) -> Result<StorageCell> {
-        Self::deserialize_cell(self.db.get(&cell_id)?.as_ref(), boc_db)
+        let (cell_data, references) = Self::deserialize_cell(self.db.get(&cell_id)?.as_ref())?;
+        Ok(StorageCell::with_params(cell_data, references, boc_db))
     }
 
     /// Puts cell into transaction
@@ -27,9 +28,9 @@ impl CellDb {
     fn serialize_cell(cell: Cell) -> Result<Vec<u8>> {
         let references_count = cell.references_count() as u8;
 
-        assert!(references_count < 5);
+        assert!(references_count as usize <= MAX_REFERENCES_COUNT);
 
-        let mut data: Vec<u8> = Vec::new();
+        let mut data = Vec::new();
 
         cell.cell_data().serialize(&mut data)?;
         data.write(&[references_count])?;
@@ -38,14 +39,14 @@ impl CellDb {
             data.write(cell.reference(i as usize)?.repr_hash().as_slice())?;
         }
 
-        assert!(data.len() > 0);
+        assert!(!data.is_empty());
 
         Ok(data)
     }
 
     /// Binary deserialization of cell data
-    fn deserialize_cell(data: &[u8], boc_db: Arc<DynamicBocDb>) -> Result<StorageCell> {
-        assert!(data.len() > 0);
+    pub(crate) fn deserialize_cell(data: &[u8]) -> Result<(CellData, Vec<Reference>)> {
+        assert!(!data.is_empty());
 
         let mut reader = Cursor::new(data);
         let cell_data = CellData::deserialize(&mut reader)?;
@@ -56,6 +57,6 @@ impl CellDb {
             references.push(Reference::NeedToLoad(hash));
         }
 
-        Ok(StorageCell::with_params(cell_data, references, boc_db, 0))
+        Ok((cell_data, references))
     }
 }

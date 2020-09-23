@@ -48,7 +48,7 @@ impl FileDb {
 
     fn transform_io_error(err: std::io::Error, key: &[u8]) -> failure::Error {
         match err.kind() {
-            ErrorKind::NotFound => StorageError::KeyNotFound(hex::encode(key)).into(),
+            ErrorKind::NotFound => StorageError::KeyNotFound("&[u8]", hex::encode(key)).into(),
             ErrorKind::UnexpectedEof => StorageError::OutOfRange.into(),
             _ => err.into()
         }
@@ -80,10 +80,18 @@ impl KvcAsync for FileDb {
 
 #[async_trait]
 impl<K: DbKey + Send + Sync> KvcReadableAsync<K> for FileDb {
-    async fn get<'a>(&'a self, key: &K) -> Result<DbSlice<'a>> {
+    async fn try_get<'a>(&'a self, key: &K) -> Result<Option<DbSlice<'a>>> {
         let path = self.make_path(key.key());
-        Ok(DbSlice::Vector(tokio::fs::read(path).await
-            .map_err(|err| Self::transform_io_error(err, key.key()))?))
+        match tokio::fs::read(path).await {
+            Ok(vec) => Ok(Some(DbSlice::Vector(vec))),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err)?
+        }
+    }
+
+    async fn get<'a>(&'a self, key: &K) -> Result<DbSlice<'a>> {
+        self.try_get(key).await?
+            .ok_or_else(|| StorageError::KeyNotFound(key.key_name(), key.as_string()).into())
     }
 
     async fn get_slice<'a>(&'a self, key: &K, offset: u64, size: u64) -> Result<DbSlice<'a>> {

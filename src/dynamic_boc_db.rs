@@ -1,21 +1,20 @@
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, RwLock, Weak};
 
 use fnv::FnvHashMap;
 
 use ton_types::{Cell, Result};
 
 use crate::cell_db::CellDb;
-use crate::types::{CellId, Reference, StorageCell};
-use crate::db::traits::KvcTransaction;
+use crate::dynamic_boc_diff_writer::{DynamicBocDiffFactory, DynamicBocDiffWriter};
+use crate::types::{CellId, StorageCell};
 
 #[derive(Debug)]
 pub struct DynamicBocDb {
     db: Arc<CellDb>,
-    cells: Arc<Mutex<FnvHashMap<CellId, Weak<StorageCell>>>>,
-    gc_gen: AtomicU32,
+    cells: Arc<RwLock<FnvHashMap<CellId, Weak<StorageCell>>>>,
+    diff_factory: DynamicBocDiffFactory,
 }
 
 impl DynamicBocDb {
@@ -31,28 +30,32 @@ impl DynamicBocDb {
 
     /// Constructs new instance using given key-value collection implementation
     pub(crate) fn with_db(db: CellDb) -> Self {
+        let db = Arc::new(db);
         Self {
-            db: Arc::new(db),
-            cells: Arc::new(Mutex::new(FnvHashMap::default())),
-            gc_gen: AtomicU32::new(0),
+            db: Arc::clone(&db),
+            cells: Arc::new(RwLock::new(FnvHashMap::default())),
+            diff_factory: DynamicBocDiffFactory::new(db),
         }
     }
 
-    pub fn cells_map(&self) -> Arc<Mutex<FnvHashMap<CellId, Weak<StorageCell>>>> {
+    pub fn cell_db(&self) -> &Arc<CellDb> {
+        &self.db
+    }
+
+    pub fn cells_map(&self) -> Arc<RwLock<FnvHashMap<CellId, Weak<StorageCell>>>> {
         Arc::clone(&self.cells)
     }
 
     /// Converts tree of cells into DynamicBoc
     pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: Cell) -> Result<usize> {
-        let transaction = self.db.begin_transaction()?;
+        let diff_writer = self.diff_factory.construct();
 
-        self.save_tree_of_cells_recursive(
+        let written_count = self.save_tree_of_cells_recursive(
             root_cell.clone(),
             Arc::clone(&self.db),
-            &transaction)?;
+            &diff_writer)?;
 
-        let written_count = transaction.len();
-        transaction.commit()?;
+        diff_writer.apply()?;
 
         Ok(written_count)
     }
@@ -61,13 +64,18 @@ impl DynamicBocDb {
     pub fn load_dynamic_boc(self: &Arc<Self>, root_cell_id: &CellId) -> Result<Cell> {
         let storage_cell = self.load_cell(root_cell_id)?;
 
-        storage_cell.gc_gen().compare_and_swap(0, self.gc_generation(), Ordering::SeqCst);
-
         Ok(Cell::with_cell_impl_arc(storage_cell))
     }
 
+    pub(crate) fn diff_factory(&self) -> &DynamicBocDiffFactory {
+        &self.diff_factory
+    }
+
     pub(crate) fn load_cell(self: &Arc<Self>, cell_id: &CellId) -> Result<Arc<StorageCell>> {
-        if let Some(cell) = self.cells.lock().unwrap().get(&cell_id) {
+        if let Some(cell) = self.cells.read()
+            .expect("Poisoned RwLock")
+            .get(&cell_id)
+        {
             if let Some(ref cell) = Weak::upgrade(&cell) {
                 return Ok(Arc::clone(cell));
             }
@@ -77,52 +85,36 @@ impl DynamicBocDb {
         let storage_cell = Arc::new(
             CellDb::get_cell(&*self.db, &cell_id, Arc::clone(self))?
         );
-        self.cells.lock().unwrap()
+        self.cells.write()
+            .expect("Poisoned RwLock")
             .insert(cell_id.clone(), Arc::downgrade(&storage_cell));
 
         Ok(storage_cell)
-    }
-
-    fn gc_generation(&self) -> u32 {
-        self.gc_gen.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn new_gc_generation(&self) -> u32 {
-        let result = self.gc_gen.fetch_add(1, Ordering::SeqCst) + 1;
-
-        // Fail, if overflowed:
-        assert_ne!(result, 0);
-
-        result
     }
 
     fn save_tree_of_cells_recursive(
         self: &Arc<Self>,
         cell: Cell,
         cell_db: Arc<CellDb>,
-        transaction: &Box<dyn KvcTransaction<CellId>>
-    ) -> Result<()> {
+        diff_writer: &DynamicBocDiffWriter
+    ) -> Result<usize> {
         let cell_id = CellId::new(cell.repr_hash());
         if cell_db.contains(&cell_id)? {
-            return Ok(());
+            return Ok(0);
         }
 
-        let mut references = Vec::with_capacity(cell.references_count());
-        for i in 0..cell.references_count() {
-            references.push(Reference::NeedToLoad(cell.reference(i)?.repr_hash()));
-        }
+        diff_writer.add_cell(cell_id, cell.clone());
 
-        CellDb::put_cell(transaction.as_ref(), &cell_id, cell.clone())?;
-
+        let mut count = 1;
         for i in 0..cell.references_count() {
-            self.save_tree_of_cells_recursive(
+            count += self.save_tree_of_cells_recursive(
                 cell.reference(i)?,
                 Arc::clone(&cell_db),
-                transaction
+                diff_writer
             )?;
         }
 
-        Ok(())
+        Ok(count)
     }
 }
 

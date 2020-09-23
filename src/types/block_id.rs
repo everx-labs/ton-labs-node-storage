@@ -1,21 +1,25 @@
-use std::fmt::{Display, Formatter};  
+use std::fmt::{Display, Formatter};
+
 use sha2::{Digest, Sha256};
+
+use ton_block::BlockIdExt;
+
 use crate::db::traits::DbKey;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockId {
     key: Vec<u8>,
-    block_id_ext: ton_block::BlockIdExt,
+    block_id_ext: BlockIdExt,
 }
 
 impl BlockId {
-    pub fn block_id_ext(&self) -> &ton_block::BlockIdExt {
+    pub const fn block_id_ext(&self) -> &BlockIdExt {
         &self.block_id_ext
     }
 }
 
-impl From<ton_block::BlockIdExt> for BlockId {
-    fn from(block_id_ext: ton_block::BlockIdExt) -> Self {
+impl From<BlockIdExt> for BlockId {
+    fn from(block_id_ext: BlockIdExt) -> Self {
         let mut hasher = Sha256::new();
         hasher.input(block_id_ext.shard_id.workchain_id().to_le_bytes());
         hasher.input(block_id_ext.shard_id.shard_prefix_with_tag().to_le_bytes());
@@ -28,8 +32,8 @@ impl From<ton_block::BlockIdExt> for BlockId {
     }
 }
 
-impl From<&ton_block::BlockIdExt> for BlockId {
-    fn from(block_id_ext: &ton_block::BlockIdExt) -> Self {
+impl From<&BlockIdExt> for BlockId {
+    fn from(block_id_ext: &BlockIdExt) -> Self {
         Self::from(block_id_ext.clone())
     }
 }
@@ -41,6 +45,14 @@ impl Display for BlockId {
 }
 
 impl DbKey for BlockId {
+    fn key_name(&self) -> &'static str {
+        "BlockId"
+    }
+
+    fn as_string(&self) -> String {
+        format!("{}", self.block_id_ext)
+    }
+
     fn key(&self) -> &[u8] {
         &self.key
     }
