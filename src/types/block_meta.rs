@@ -13,11 +13,10 @@ pub struct BlockMeta {
     masterchain_ref_seq_no: AtomicU32,
     fetched: AtomicBool,
     handle_stored: AtomicBool,
-    archived: AtomicBool,
 }
 
 impl BlockMeta {
-    pub const fn with_data(flags: u32, gen_utime: u32, gen_lt: u64, masterchain_ref_seq_no: u32, fetched: bool, archived: bool) -> Self {
+    pub const fn with_data(flags: u32, gen_utime: u32, gen_lt: u64, masterchain_ref_seq_no: u32, fetched: bool) -> Self {
         Self {
             flags: AtomicU32::new(flags),
             gen_utime: AtomicU32::new(gen_utime),
@@ -25,7 +24,6 @@ impl BlockMeta {
             masterchain_ref_seq_no: AtomicU32::new(masterchain_ref_seq_no),
             fetched: AtomicBool::new(fetched),
             handle_stored: AtomicBool::new(false),
-            archived: AtomicBool::new(archived),
         }
     }
 
@@ -60,14 +58,6 @@ impl BlockMeta {
     pub fn set_handle_stored(&self) -> bool {
         self.handle_stored.compare_and_swap(false, true, Ordering::SeqCst)
     }
-
-    pub fn archived(&self) -> bool {
-        self.archived.load(Ordering::SeqCst)
-    }
-
-    pub fn set_archived(&self) -> bool {
-        self.archived.compare_and_swap(false, true, Ordering::SeqCst)
-    }
 }
 
 impl Serializable for BlockMeta {
@@ -77,7 +67,6 @@ impl Serializable for BlockMeta {
         writer.write_all(&self.gen_lt.load(Ordering::SeqCst).to_le_bytes())?;
         writer.write_all(&self.masterchain_ref_seq_no.load(Ordering::SeqCst).to_le_bytes())?;
         writer.write_all(&[self.fetched() as u8])?;
-        writer.write_all(&[self.archived() as u8])?;
 
         Ok(())
     }
@@ -88,8 +77,7 @@ impl Serializable for BlockMeta {
         let gen_lt = reader.read_le_u64()?;
         let masterchain_ref_seq_no = reader.read_le_u32()?;
         let fetched = reader.read_byte()? != 0;
-        let archived = reader.read_byte()? != 0;
 
-        Ok(Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, fetched, archived) )
+        Ok(Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, fetched) )
     }
 }
