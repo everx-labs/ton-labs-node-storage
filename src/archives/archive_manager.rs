@@ -6,17 +6,18 @@ use std::sync::Arc;
 
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
+use tokio::time::{delay_for, Duration};
 
+use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
 use ton_types::{error, Result, UInt256};
 
-use crate::archives::{get_mc_seq_no, is_data_inited, is_key_block, is_proof_inited, is_prooflink_inited};
+use crate::archives::{get_mc_seq_no, is_data_inited, is_key_block, is_moved_to_archive, is_moving_to_archive, is_proof_inited, is_prooflink_inited};
 use crate::archives::archive_slice::ArchiveSlice;
 use crate::archives::file_maps::{FileDescription, FileMaps};
 use crate::archives::package_entry_id::{GetFileName, GetFileNameShort, PackageEntryId};
 use crate::archives::package_id::PackageId;
 use crate::types::BlockMeta;
-use ton_api::ton::PublicKey;
 
 
 pub const ARCHIVE_SIZE: usize = 20_000;
@@ -71,13 +72,22 @@ impl ArchiveManager {
         Ok(())
     }
 
-    pub async fn get_file<B, U256, PK>(&self, block_id: &BlockIdExt, block_meta: &BlockMeta, entry_id: &PackageEntryId<B, U256, PK>) -> Result<Vec<u8>>
+    pub async fn get_file<B, U256, PK>(
+        &self,
+        block_id: &BlockIdExt,
+        block_meta: &BlockMeta,
+        entry_id: &PackageEntryId<B, U256, PK>
+    ) -> Result<Vec<u8>>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<PublicKey> + Hash
     {
-        if block_meta.archived() {
+        while is_moving_to_archive(block_meta) {
+            delay_for(Duration::from_millis(1)).await;
+        }
+
+        if is_moved_to_archive(block_meta) {
             let package_id = self.get_package_id(get_mc_seq_no(block_id, block_meta)).await?;
             if let Some(ref fd) = self.get_file_desc(package_id, false).await? {
                 return Ok(fd.archive_slice()
@@ -86,15 +96,11 @@ impl ArchiveManager {
             }
         }
 
-        let (_filename, data) = self.read_temp_file(entry_id).await?;
-
-        Ok(data)
+        self.read_temp_file(entry_id).await
+            .map(|(_filename, data)| data)
     }
 
     pub async fn move_to_archive(&self, block_id: &BlockIdExt, block_meta: &BlockMeta) {
-        if block_meta.archived() {
-            return;
-        }
         let proof_inited = is_proof_inited(block_meta);
         let prooflink_inited = is_prooflink_inited(block_meta);
         let data_inited = is_data_inited(block_meta);
@@ -119,8 +125,6 @@ impl ArchiveManager {
         if data_inited {
             self.move_file_to_archive_log_errors(block_id, block_meta, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(block_id)).await;
         }
-
-        block_meta.set_archived();
     }
 
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Result<Option<u64>> {

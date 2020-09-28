@@ -162,7 +162,7 @@ pub trait FromFileName {
 
 impl GetFileName for BlockIdExt {
     fn filename(&self) -> String {
-        format!("({wc_id},{shard_id:x},{seq_no}):{root_hash:X}:{file_hash:X}",
+        format!("({wc_id},{shard_id:016x},{seq_no}):{root_hash:X}:{file_hash:X}",
                 wc_id = self.shard().workchain_id(),
                 shard_id = self.shard().shard_prefix_with_tag(),
                 seq_no = self.seq_no(),
@@ -174,7 +174,7 @@ impl GetFileName for BlockIdExt {
 
 fn parse_block_id(filename: &str) -> Result<(BlockIdExt, usize)> {
     lazy_static! {
-            static ref REGEX: Regex = Regex::new(r"^\((-?\d+),([0-9a-f]{16}),(\d+)\):([0-9a-f]{64}):([0-9a-f]{64})")
+            static ref REGEX: Regex = Regex::new(r"^\((-?\d+),([0-9a-f]{16}),(\d+)\):([0-9A-F]{64}):([0-9A-F]{64})")
                 .expect("Failed to compile regular expression");
         }
 

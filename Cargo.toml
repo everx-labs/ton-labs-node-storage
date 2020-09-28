@@ -21,7 +21,7 @@ serde_derive = "1.0.114"
 sha2 = "^0.8"
 strum = "0.18.0"
 strum_macros = "0.18.0"
-tokio = { version = "0.2.21", features = ["fs", "sync"] }
+tokio = { version = "0.2.21", features = ["fs", "sync", "time"] }
 
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl.git", package = "ton_api" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block.git" }

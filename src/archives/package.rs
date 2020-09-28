@@ -1,32 +1,32 @@
 use std::io::SeekFrom;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures::Future;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 use ton_types::{fail, Result};
 
 use crate::archives::package_entry::{PackageEntry, PKG_ENTRY_HEADER_SIZE};
-use futures::Future;
-use std::sync::Arc;
 
 
 #[derive(Debug)]
 pub struct Package {
-    file: File,
-    size: u64,
+    path: Arc<PathBuf>,
+    read_only: bool,
+    size: AtomicU64,
+    write_mutex: Mutex<()>
 }
 
 pub(crate) const PKG_HEADER_SIZE: usize = 4;
 const PKG_HEADER_MAGIC: u32 = 0xAE8F_DD01;
 
 impl Package {
-    pub async fn open(path: impl AsRef<Path>, read_only: bool, create: bool) -> Result<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(!read_only || create)
-            .create(create)
-            .open(&path).await?;
+    pub async fn open(path: Arc<PathBuf>, read_only: bool, create: bool) -> Result<Self> {
+        let mut file = Self::open_file_ext(read_only, create, &*path).await?;
         let mut size = file.metadata().await?.len();
 
         file.seek(SeekFrom::Start(0)).await?;
@@ -46,49 +46,74 @@ impl Package {
             }
         }
 
-        Ok(Self { file, size })
+        Ok(
+            Self {
+                path,
+                read_only, size:
+                AtomicU64::new(size),
+                write_mutex: Mutex::new(()),
+            }
+        )
     }
 
     pub fn size(&self) -> u64 {
-        self.size - PKG_HEADER_SIZE as u64
+        self.size.load(Ordering::SeqCst) - PKG_HEADER_SIZE as u64
     }
 
-    pub async fn truncate(&mut self, size: u64) -> Result<()> {
+    pub const fn path(&self) -> &Arc<PathBuf> {
+        &self.path
+    }
+
+    pub async fn truncate(&self, size: u64) -> Result<()> {
         let new_size = PKG_HEADER_SIZE as u64 + size;
         log::debug!(target: "storage", "Truncating package, new size: {} bytes", new_size);
-        self.size = new_size;
-        Ok(self.file.set_len(new_size).await?)
+        self.size.store(new_size, Ordering::SeqCst);
+
+        {
+            let mut file = self.open_file().await?;
+            let _write_guard = self.write_mutex.lock().await;
+            file.set_len(new_size).await?;
+        }
+
+        Ok(())
     }
 
-    pub async fn read_entry(&mut self, offset: u64) -> Result<PackageEntry> {
+    pub async fn read_entry(&self, offset: u64) -> Result<PackageEntry> {
         if self.size() <= offset + PKG_ENTRY_HEADER_SIZE as u64 {
             fail!("Unexpected end of file while reading archives entry with offset: {}", offset)
         }
-        self.file.seek(SeekFrom::Start(PKG_HEADER_SIZE as u64 + offset)).await?;
 
-        PackageEntry::read_from_file(&mut self.file).await
+        let mut file = self.open_file().await?;
+        file.seek(SeekFrom::Start(PKG_HEADER_SIZE as u64 + offset)).await?;
+
+        PackageEntry::read_from_file(&mut file).await
     }
 
-    pub async fn append_entry(&mut self, entry: &PackageEntry) -> Result<u64> {
+    pub async fn append_entry(&self, entry: &PackageEntry) -> Result<(u64, u64)> {
         assert!(entry.filename().as_bytes().len() <= u16::max_value() as usize);
         assert!(entry.data().len() <= u32::max_value() as usize);
 
-        let entry_offset = self.size();
+        let mut file = self.open_file().await?;
+        {
+            let _write_guard = self.write_mutex.lock().await;
+            file.seek(SeekFrom::End(0)).await?;
+            let entry_offset = self.size();
+            let entry_size = entry.write_to_file(&mut file).await?;
+            self.size.fetch_add(entry_size, Ordering::SeqCst);
 
-        self.file.seek(SeekFrom::End(0)).await?;
-        self.size += entry.write_to_file(&mut self.file).await?;
-
-        Ok(entry_offset)
+            Ok((entry_offset, entry_offset + entry_size))
+        }
     }
 
-    pub async fn for_each<F, P>(&mut self, mut predicate: impl FnMut(PackageEntry, Arc<P>) -> F, payload: Arc<P>) -> Result<bool>
+    pub async fn for_each<F, P>(&self, mut predicate: impl FnMut(PackageEntry, Arc<P>) -> F, payload: Arc<P>) -> Result<bool>
     where
         F: Future<Output = Result<bool>>
     {
-        self.file.seek(SeekFrom::Start(PKG_HEADER_SIZE as u64)).await?;
+        let mut file = self.open_file().await?;
+        file.seek(SeekFrom::Start(PKG_HEADER_SIZE as u64)).await?;
         let mut remaining = self.size();
         while remaining > 0 {
-            let entry = PackageEntry::read_from_file(&mut self.file).await?;
+            let entry = PackageEntry::read_from_file(&mut file).await?;
             remaining -= (PKG_ENTRY_HEADER_SIZE + entry.filename().as_bytes().len() + entry.data().len()) as u64;
             if !predicate(entry, Arc::clone(&payload)).await? {
                 return Ok(false);
@@ -96,5 +121,17 @@ impl Package {
         }
 
         Ok(true)
+    }
+
+    async fn open_file_ext(read_only: bool, create: bool, path: impl AsRef<Path>) -> Result<File> {
+        Ok(OpenOptions::new()
+            .read(true)
+            .write(!read_only || create)
+            .create(create)
+            .open(&path).await?)
+    }
+
+    async fn open_file(&self) -> Result<File> {
+        Self::open_file_ext(self.read_only, false, &*self.path).await
     }
 }

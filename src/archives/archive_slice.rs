@@ -132,10 +132,10 @@ impl ArchiveSlice {
 
     #[allow(dead_code)]
     pub async fn destroy(mut self) -> Result<()> {
-        for package in self.packages.write().await.drain(..) {
-            let path = package.path().clone();
-            drop(package);
-            tokio::fs::remove_file(path).await?;
+        for pi in self.packages.write().await.drain(..) {
+            let path = Arc::clone(pi.package().path());
+            drop(pi);
+            tokio::fs::remove_file(&*path).await?;
         }
 
         Arc::get_mut(&mut self.index_db)
@@ -175,11 +175,8 @@ impl ArchiveSlice {
 
         let package_info = self.choose_package(get_mc_seq_no_opt(block_handle), true).await?;
 
-        let (offset, size) = {
-            let entry = PackageEntry::with_data(entry_id.filename(), data);
-            let mut write_guard = package_info.package().write().await;
-            (write_guard.append_entry(&entry).await?, write_guard.size())
-        };
+        let entry = PackageEntry::with_data(entry_id.filename(), data);
+        let (offset, size) = package_info.package().append_entry(&entry).await?;
 
         let idx = if self.sliced_mode {
             package_info.idx()
@@ -194,7 +191,11 @@ impl ArchiveSlice {
         self.offsets_db.put_value(&offset_key, offset)
     }
 
-    pub async fn get_file<B, U256, PK>(&self, block_handle: Option<(&BlockIdExt, &BlockMeta)>, entry_id: &PackageEntryId<B, U256, PK>) -> Result<PackageEntry>
+    pub async fn get_file<B, U256, PK>(
+        &self,
+        block_handle: Option<(&BlockIdExt, &BlockMeta)>,
+        entry_id: &PackageEntryId<B, U256, PK>
+    ) -> Result<PackageEntry>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
@@ -206,11 +207,13 @@ impl ArchiveSlice {
 
         let package_info = self.choose_package(get_mc_seq_no_opt(block_handle), false).await?;
 
-        log::debug!(target: "storage", "Reading package entry: {:?}, offset: {}", package_info.path(), offset);
-        {
-            let mut package_guard = package_info.package().write().await;
-            package_guard.read_entry(offset).await
-        }
+        log::debug!(
+            target: "storage",
+            "Reading package entry: {:?}, offset: {}",
+            package_info.package().path(),
+            offset
+        );
+        package_info.package().read_entry(offset).await
     }
 
     pub async fn get_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
@@ -220,7 +223,7 @@ impl ArchiveSlice {
         }
 
         let package_info = self.choose_package(archive_id, false).await?;
-        let mut file = File::open(package_info.path()).await?;
+        let mut file = File::open(&**package_info.package().path()).await?;
         let mut buffer = vec![0; limit as usize];
         file.seek(SeekFrom::Start(offset)).await?;
         let mut buf_offset = 0;
@@ -241,9 +244,9 @@ impl ArchiveSlice {
     async fn new_package(&self, idx: u32, seq_no: u32, size: u64, version: u32) -> Result<Arc<PackageInfo>> {
         log::debug!(target: "storage", "Adding package, seq_no: {}, size: {} bytes, version: {}", seq_no, size, version);
         let package_id = PackageId::with_values(seq_no, self.package_type);
-        let path = package_id.full_path(self.db_root_path.as_ref(), "pack");
+        let path = Arc::new(package_id.full_path(self.db_root_path.as_ref(), "pack"));
 
-        let mut package = Package::open(&path, false, true).await
+        let package = Package::open(Arc::clone(&path), false, true).await
             .map_err(|err| error!("Failed to open or create archive \"{}\": {}", path.to_string_lossy(), err))?;
 
         if !self.finalized && version >= DEFAULT_PKG_VERSION {
@@ -252,8 +255,7 @@ impl ArchiveSlice {
 
         let pi = Arc::new(PackageInfo::with_data(
             package_id,
-            Arc::new(RwLock::new(package)),
-            path,
+            package,
             idx,
             version
         ));

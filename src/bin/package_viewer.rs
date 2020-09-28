@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -19,10 +19,10 @@ async fn print_entry(entry: PackageEntry, count: Arc<AtomicU32>) -> Result<bool>
     Ok(true)
 }
 
-async fn run(filename: impl AsRef<Path>) -> Result<()> {
-    println!("Filename: {:?}", filename.as_ref());
+async fn run(filename: PathBuf) -> Result<()> {
+    println!("Filename: {:?}", &filename);
 
-    let mut package = Package::open(filename, true, false).await?;
+    let package = Package::open(Arc::new(filename), true, false).await?;
 
     print_separator();
     print_row(&["File Name".to_uppercase(), "Size".to_uppercase()]);
