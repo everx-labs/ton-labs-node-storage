@@ -176,7 +176,6 @@ impl ArchiveSlice {
         let package_info = self.choose_package(get_mc_seq_no_opt(block_handle), true).await?;
 
         let entry = PackageEntry::with_data(entry_id.filename(), data);
-        let (offset, size) = package_info.package().append_entry(&entry).await?;
 
         let idx = if self.sliced_mode {
             package_info.idx()
@@ -185,10 +184,14 @@ impl ArchiveSlice {
             u32::max_value()
         };
 
-        let meta = PackageEntryMeta::with_data(size, package_info.version());
-        log::debug!(target: "storage", "Writing package entry metadata for slice #{}: {:?}, offset: {}", idx, meta, offset);
-        self.index_db.put_value(&idx.into(), meta)?;
-        self.offsets_db.put_value(&offset_key, offset)
+        package_info.package().append_entry(&entry,
+            |offset, size| {
+                let meta = PackageEntryMeta::with_data(size, package_info.version());
+                log::debug!(target: "storage", "Writing package entry metadata for slice #{}: {:?}, offset: {}", idx, meta, offset);
+                self.index_db.put_value(&idx.into(), meta)?;
+                self.offsets_db.put_value(&offset_key, offset)
+            }
+        ).await
     }
 
     pub async fn get_file<B, U256, PK>(
@@ -284,7 +287,13 @@ impl ArchiveSlice {
                 }
 
                 if idx as usize != package_count {
-                    fail!("Packages must not be skipped! idx = {}, expected = {}", idx, package_count)
+                    fail!(
+                        "Packages must not be skipped! mc_seq_no = {}, archive_id = {}, idx = {}, expected = {}",
+                        mc_seq_no,
+                        self.archive_id,
+                        idx,
+                        package_count
+                    )
                 }
 
                 if (mc_seq_no - self.archive_id) % self.slice_size != 0 {

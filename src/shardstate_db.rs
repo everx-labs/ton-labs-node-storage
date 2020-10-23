@@ -148,7 +148,7 @@ impl AllowStateGcResolverImpl {
 impl AllowStateGcResolver for AllowStateGcResolverImpl {
     fn allow_state_gc(&self, block_id_ext: &BlockIdExt, gc_utime: UnixTime32) -> Result<bool> {
         let block_id = BlockId::from(block_id_ext);
-        let block_meta = self.block_handle_db.get(&block_id)?;
+        let block_meta = self.block_handle_db.get_value(&block_id)?;
 
         // TODO: Implement more sophisticated logic of decision shard state garbage collecting
 

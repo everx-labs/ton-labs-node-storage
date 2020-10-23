@@ -1,6 +1,8 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use tokio::sync::RwLock;
+
 use ton_types::{ByteOrderRead, Result};
 
 use crate::traits::Serializable;
@@ -12,18 +14,24 @@ pub struct BlockMeta {
     gen_lt: AtomicU64,
     masterchain_ref_seq_no: AtomicU32,
     fetched: AtomicBool,
-    handle_stored: AtomicBool,
+    moving_to_archive_started: AtomicBool,
+    temp_lock: RwLock<()>,
+    #[cfg(feature = "block_meta_test_counter")]
+    pub test_counter: AtomicU32,
 }
 
 impl BlockMeta {
-    pub const fn with_data(flags: u32, gen_utime: u32, gen_lt: u64, masterchain_ref_seq_no: u32, fetched: bool) -> Self {
+    pub fn with_data(flags: u32, gen_utime: u32, gen_lt: u64, masterchain_ref_seq_no: u32, fetched: bool) -> Self {
         Self {
             flags: AtomicU32::new(flags),
             gen_utime: AtomicU32::new(gen_utime),
             gen_lt: AtomicU64::new(gen_lt),
             masterchain_ref_seq_no: AtomicU32::new(masterchain_ref_seq_no),
             fetched: AtomicBool::new(fetched),
-            handle_stored: AtomicBool::new(false),
+            moving_to_archive_started: AtomicBool::new(false),
+            temp_lock: RwLock::new(()),
+            #[cfg(feature = "block_meta_test_counter")]
+            test_counter: AtomicU32::new(0),
         }
     }
 
@@ -48,15 +56,15 @@ impl BlockMeta {
     }
 
     pub fn set_fetched(&self) -> bool {
-        self.fetched.compare_and_swap(false, true, Ordering::SeqCst)
+        self.fetched.swap(true, Ordering::SeqCst)
     }
 
-    pub fn handle_stored(&self) -> bool {
-        self.handle_stored.load(Ordering::SeqCst)
+    pub fn start_moving_to_archive(&self) -> bool {
+        self.moving_to_archive_started.swap(true, Ordering::SeqCst)
     }
 
-    pub fn set_handle_stored(&self) -> bool {
-        self.handle_stored.compare_and_swap(false, true, Ordering::SeqCst)
+    pub(crate) fn temp_lock(&self) -> &RwLock<()>  {
+        &self.temp_lock
     }
 }
 
@@ -68,6 +76,9 @@ impl Serializable for BlockMeta {
         writer.write_all(&self.masterchain_ref_seq_no.load(Ordering::SeqCst).to_le_bytes())?;
         writer.write_all(&[self.fetched() as u8])?;
 
+        #[cfg(feature = "block_meta_test_counter")]
+        writer.write_all(&self.test_counter.load(Ordering::SeqCst).to_le_bytes())?;
+
         Ok(())
     }
 
@@ -77,7 +88,13 @@ impl Serializable for BlockMeta {
         let gen_lt = reader.read_le_u64()?;
         let masterchain_ref_seq_no = reader.read_le_u32()?;
         let fetched = reader.read_byte()? != 0;
+        let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, fetched);
 
-        Ok(Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, fetched) )
+        #[cfg(feature = "block_meta_test_counter")] {
+            let test_counter = reader.read_le_u32().unwrap_or_default();
+            bm.test_counter.store(test_counter, Ordering::Relaxed);
+        }
+
+        Ok(bm)
     }
 }
