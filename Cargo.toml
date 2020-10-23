@@ -30,3 +30,6 @@ ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
 [dev-dependencies]
 rand = "0.7.3"
 tokio = { version = "0.2.21", features = ["macros"] }
+
+[features]
+block_meta_test_counter = []

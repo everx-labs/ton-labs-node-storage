@@ -193,12 +193,14 @@ impl BlockIndexDb {
         fail!("Block not found")
     }
 
-    pub(crate) fn add_handle(&self, block_id: &BlockId, block_meta: &BlockMeta) -> Result<()> {
+    pub fn add_handle(&self, block_id: &BlockId, block_meta: &BlockMeta) -> Result<()> {
+        log::trace!(target: "storage", "BlockIndexDb::add_handle {}", block_id);
         let desc_key = ShardIdentKey::new(block_id.block_id_ext().shard())?;
         let mut shard_index = 0;
         let lt_desc_db_locked = self.lt_desc_db.write()
             .expect("Poisoned RwLock");
         let (mut lt_desc, add_shard) = if let Some(lt_desc) = lt_desc_db_locked.try_get_value(&desc_key)? {
+            assert!(block_id.block_id_ext().seq_no() > lt_desc.last_seq_no(), "Block handles seq_no must be written in ascending order!");
             (lt_desc, false)
         } else {
             if let Some(status) = self.status_db.try_get_value::<LtDbStatusEntry>(&StatusKey::LtDbStatus)? {

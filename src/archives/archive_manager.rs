@@ -6,16 +6,15 @@ use std::sync::Arc;
 
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use tokio::time::{delay_for, Duration};
 
 use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
 use ton_types::{error, Result, UInt256};
 
-use crate::archives::{get_mc_seq_no, is_data_inited, is_key_block, is_moved_to_archive, is_moving_to_archive, is_proof_inited, is_prooflink_inited};
+use crate::archives::{get_mc_seq_no, is_data_inited, is_key_block, is_moved_to_archive, is_proof_inited, is_prooflink_inited};
 use crate::archives::archive_slice::ArchiveSlice;
 use crate::archives::file_maps::{FileDescription, FileMaps};
-use crate::archives::package_entry_id::{GetFileName, GetFileNameShort, PackageEntryId};
+use crate::archives::package_entry_id::{GetFileNameShort, PackageEntryId};
 use crate::archives::package_id::PackageId;
 use crate::types::BlockMeta;
 
@@ -68,6 +67,7 @@ impl ArchiveManager {
             .truncate(true)
             .open(&filename).await?;
         file.write_all(&data).await?;
+        file.flush().await?;
 
         Ok(())
     }
@@ -83,9 +83,7 @@ impl ArchiveManager {
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<PublicKey> + Hash
     {
-        while is_moving_to_archive(block_meta) {
-            delay_for(Duration::from_millis(1)).await;
-        }
+        block_meta.temp_lock().read().await;
 
         if is_moved_to_archive(block_meta) {
             let package_id = self.get_package_id(get_mc_seq_no(block_id, block_meta)).await?;
@@ -100,7 +98,16 @@ impl ArchiveManager {
             .map(|(_filename, data)| data)
     }
 
-    pub async fn move_to_archive(&self, block_id: &BlockIdExt, block_meta: &BlockMeta) {
+    pub async fn move_to_archive(
+        &self,
+        block_id: &BlockIdExt,
+        block_meta: &BlockMeta,
+        mut on_success: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        if block_meta.start_moving_to_archive() {
+            return Ok(());
+        }
+
         let proof_inited = is_proof_inited(block_meta);
         let prooflink_inited = is_prooflink_inited(block_meta);
         let data_inited = is_data_inited(block_meta);
@@ -116,15 +123,32 @@ impl ArchiveManager {
             );
         }
 
-        if proof_inited {
-            self.move_file_to_archive_log_errors(block_id, block_meta, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(block_id)).await;
+        let proof_filename = if proof_inited {
+            Some(self.move_file_to_archive(block_id, block_meta, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(block_id)).await?)
+        } else if prooflink_inited {
+            Some(self.move_file_to_archive(block_id, block_meta, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(block_id)).await?)
+        } else {
+            None
+        };
+        let block_filename = if data_inited {
+            Some(self.move_file_to_archive(block_id, block_meta, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(block_id)).await?)
+        } else {
+            None
+        };
+
+        on_success()?;
+
+        {
+            block_meta.temp_lock().write().await;
+            if let Some(filename) = proof_filename {
+                tokio::fs::remove_file(filename).await?;
+            }
+            if let Some(filename) = block_filename {
+                tokio::fs::remove_file(filename).await?;
+            }
         }
-        if prooflink_inited {
-            self.move_file_to_archive_log_errors(block_id, block_meta, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(block_id)).await;
-        }
-        if data_inited {
-            self.move_file_to_archive_log_errors(block_id, block_meta, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(block_id)).await;
-        }
+
+        Ok(())
     }
 
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Result<Option<u64>> {
@@ -143,24 +167,17 @@ impl ArchiveManager {
         fd.archive_slice().get_slice(archive_id, offset, limit).await
     }
 
-    async fn move_file_to_archive_log_errors<B, U256, PK>(&self, block_id: &BlockIdExt, block_meta: &BlockMeta, entry_id: &PackageEntryId<B, U256, PK>)
-    where
-        B: Borrow<BlockIdExt> + Hash,
-        U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
-    {
-        self.move_file_to_archive(block_id, block_meta, &entry_id).await
-            .unwrap_or_else(|err| log::error!(target: "storage", "Failed to move entry to archive: {}. Error: {}", entry_id, err));
-    }
-
-    async fn move_file_to_archive<B, U256, PK>(&self, block_id: &BlockIdExt, block_meta: &BlockMeta, entry_id: &PackageEntryId<B, U256, PK>) -> Result<()>
+    async fn move_file_to_archive<B, U256, PK>(&self, block_id: &BlockIdExt, block_meta: &BlockMeta, entry_id: &PackageEntryId<B, U256, PK>) -> Result<PathBuf>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<PublicKey> + Hash
     {
         log::debug!(target: "storage", "Moving entry to archive: {}", entry_id.filename_short());
-        let (filename, data) = self.read_temp_file(entry_id).await?;
+        let (filename, data) = {
+            block_meta.temp_lock().read().await;
+            self.read_temp_file(entry_id).await?
+        };
 
         // TODO: Copy proofs and prooflinks into a corresponding keyblocks archive?
 
@@ -183,9 +200,7 @@ impl ArchiveManager {
 
         fd.archive_slice().add_file(Some((block_id, block_meta)), entry_id, data).await?;
 
-        tokio::fs::remove_file(filename).await?;
-
-        Ok(())
+        Ok(filename)
     }
 
     async fn read_temp_file<B, U256, PK>(&self, entry_id: &PackageEntryId<B, U256, PK>) -> Result<(PathBuf, Vec<u8>)>
@@ -198,7 +213,7 @@ impl ArchiveManager {
         let data = tokio::fs::read(&temp_filename).await
             .map_err(|error| {
                 if error.kind() == ErrorKind::NotFound {
-                    error!("File not found in archive: {}", entry_id.filename())
+                    error!("File not found in archive: {:?}, {}", temp_filename, error)
                 } else {
                     error!("Error reading file: {:?}, {}", temp_filename, error)
                 }
@@ -208,6 +223,7 @@ impl ArchiveManager {
     }
 
     async fn get_file_desc(&self, id: PackageId, force: bool) -> Result<Option<Arc<FileDescription>>> {
+        // TODO: Rewrite logics in order to handle multithreaded adding of packages
         if let Some(fd) = self.file_maps.get(id.package_type()).get(id.id()).await {
             if fd.deleted() {
                 return Ok(None);
@@ -224,6 +240,7 @@ impl ArchiveManager {
     }
 
     async fn add_file_desc(&self, id: PackageId) -> Result<Arc<FileDescription>> {
+        // TODO: Rewrite logics in order to handle multithreaded adding of packages
         let file_map = self.file_maps.get(id.package_type());
         assert!(file_map.get(id.id()).await.is_none());
 

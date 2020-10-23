@@ -3,12 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use futures::Future;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
-
-use ton_types::{fail, Result};
+use ton_types::{error, fail, Result};
 
 use crate::archives::package_entry::{PackageEntry, PKG_ENTRY_HEADER_SIZE};
 
@@ -24,6 +22,18 @@ pub struct Package {
 pub(crate) const PKG_HEADER_SIZE: usize = 4;
 const PKG_HEADER_MAGIC: u32 = 0xAE8F_DD01;
 
+async fn read_header<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<()> {
+    let mut buf = [0; PKG_HEADER_SIZE];
+    if reader.read_exact(&mut buf).await? != PKG_HEADER_SIZE {
+        fail!("Package file read failed")
+    }
+    if u32::from_le_bytes(buf) != PKG_HEADER_MAGIC {
+        fail!("Package file header mismatch")
+    }
+
+    Ok(())
+}
+
 impl Package {
     pub async fn open(path: Arc<PathBuf>, read_only: bool, create: bool) -> Result<Self> {
         let mut file = Self::open_file_ext(read_only, create, &*path).await?;
@@ -37,13 +47,7 @@ impl Package {
             file.write(&PKG_HEADER_MAGIC.to_le_bytes()).await?;
             size = PKG_HEADER_SIZE as u64;
         } else {
-            let mut buf = [0; PKG_HEADER_SIZE];
-            if file.read(&mut buf).await? != PKG_HEADER_SIZE {
-                fail!("Package file read failed")
-            }
-            if u32::from_le_bytes(buf) != PKG_HEADER_MAGIC {
-                fail!("Package file header mismatch")
-            }
+            read_header(&mut file).await?;
         }
 
         Ok(
@@ -86,10 +90,15 @@ impl Package {
         let mut file = self.open_file().await?;
         file.seek(SeekFrom::Start(PKG_HEADER_SIZE as u64 + offset)).await?;
 
-        PackageEntry::read_from_file(&mut file).await
+        PackageEntry::read_from(&mut file).await?
+            .ok_or_else(|| error!("Package::read_entry: Unexpected end of file"))
     }
 
-    pub async fn append_entry(&self, entry: &PackageEntry) -> Result<(u64, u64)> {
+    pub async fn append_entry(
+        &self,
+        entry: &PackageEntry,
+        after_append: impl FnOnce(u64, u64) -> Result<()>
+    ) -> Result<()> {
         assert!(entry.filename().as_bytes().len() <= u16::max_value() as usize);
         assert!(entry.data().len() <= u32::max_value() as usize);
 
@@ -98,29 +107,11 @@ impl Package {
             let _write_guard = self.write_mutex.lock().await;
             file.seek(SeekFrom::End(0)).await?;
             let entry_offset = self.size();
-            let entry_size = entry.write_to_file(&mut file).await?;
+            let entry_size = entry.write_to(&mut file).await?;
             self.size.fetch_add(entry_size, Ordering::SeqCst);
 
-            Ok((entry_offset, entry_offset + entry_size))
+            after_append(entry_offset, entry_offset + entry_size)
         }
-    }
-
-    pub async fn for_each<F, P>(&self, mut predicate: impl FnMut(PackageEntry, Arc<P>) -> F, payload: Arc<P>) -> Result<bool>
-    where
-        F: Future<Output = Result<bool>>
-    {
-        let mut file = self.open_file().await?;
-        file.seek(SeekFrom::Start(PKG_HEADER_SIZE as u64)).await?;
-        let mut remaining = self.size();
-        while remaining > 0 {
-            let entry = PackageEntry::read_from_file(&mut file).await?;
-            remaining -= (PKG_ENTRY_HEADER_SIZE + entry.filename().as_bytes().len() + entry.data().len()) as u64;
-            if !predicate(entry, Arc::clone(&payload)).await? {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
     }
 
     async fn open_file_ext(read_only: bool, create: bool, path: impl AsRef<Path>) -> Result<File> {
@@ -134,4 +125,31 @@ impl Package {
     async fn open_file(&self) -> Result<File> {
         Self::open_file_ext(self.read_only, false, &*self.path).await
     }
+}
+
+pub struct PackageReader<R: AsyncReadExt + Unpin> {
+    reader: BufReader<R>,
+}
+
+impl<R: AsyncReadExt + Unpin> PackageReader<R> {
+    pub async fn next(&mut self) -> Result<Option<PackageEntry>> {
+        PackageEntry::read_from(&mut self.reader).await
+    }
+}
+
+pub async fn read_package_from_file(path: impl AsRef<Path>) -> Result<PackageReader<File>> {
+    read_package_from(
+        OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create(false)
+            .open(path).await?
+    ).await
+}
+
+pub async fn read_package_from<R: AsyncReadExt + Unpin>(reader: R) -> Result<PackageReader<R>> {
+    let mut reader = BufReader::with_capacity(1 << 19, reader);
+    read_header(&mut reader).await?;
+
+    Ok(PackageReader::<R> { reader })
 }

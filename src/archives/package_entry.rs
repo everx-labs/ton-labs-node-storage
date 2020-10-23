@@ -1,8 +1,6 @@
 use std::io::{Read, Write};
 
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ErrorKind};
 use ton_types::{ByteOrderRead, fail, Result};
 
 use crate::traits::Serializable;
@@ -61,33 +59,40 @@ impl PackageEntry {
         Self { filename, data }
     }
 
-    pub(super) async fn read_from_file(file: &mut File) -> Result<Self> {
+    pub(super) async fn read_from<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Option<Self>> {
         let mut buf = [0; PKG_ENTRY_HEADER_SIZE];
-        file.read_exact(&mut buf).await?;
+        match reader.read_exact(&mut buf).await {
+            Ok(count) => assert_eq!(count, buf.len()),
+            Err(error) => return if error.kind() == ErrorKind::UnexpectedEof {
+                Ok(None)
+            } else {
+                Err(error.into())
+            }
+        }
         let entry_header = PackageEntryHeader::from_slice(&buf)?;
 
         let mut buf = vec![0; entry_header.filename_size as usize];
-        file.read_exact(&mut buf).await?;
+        reader.read_exact(&mut buf).await?;
         let filename = String::from_utf8(buf)?;
 
-        log::debug!(target: "storage", "Reading package entry: {}, size: {}", filename, entry_header.data_size);
+        log::trace!(target: "storage", "Reading package entry: {}, size: {}", filename, entry_header.data_size);
 
         let mut data = vec![0; entry_header.data_size as usize];
-        file.read_exact(&mut data).await?;
+        reader.read_exact(&mut data).await?;
 
-        Ok(Self::with_data(filename, data))
+        Ok(Some(Self::with_data(filename, data)))
     }
 
-    pub(super) async fn write_to_file(&self, file: &mut File) -> Result<u64> {
+    pub(super) async fn write_to<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> Result<u64> {
         let entry_header = PackageEntryHeader::with_data(
             self.filename.as_bytes().len() as u16,
             self.data.len() as u32
         );
 
-        file.write_all(&entry_header.to_vec()?).await?;
-        file.write_all(self.filename.as_bytes()).await?;
-        file.write_all(&self.data).await?;
-        file.flush().await?;
+        writer.write_all(&entry_header.to_vec()?).await?;
+        writer.write_all(self.filename.as_bytes()).await?;
+        writer.write_all(&self.data).await?;
+        writer.flush().await?;
 
         Ok(entry_header.calc_entry_size())
     }
