@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
-
 use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result, UInt256};
@@ -25,7 +24,7 @@ use crate::archives::package_offsets_db::PackageOffsetsDb;
 use crate::archives::package_status_db::PackageStatusDb;
 use crate::archives::package_status_key::PackageStatusKey;
 use crate::traits::Serializable;
-use crate::types::BlockMeta;
+use crate::types::BlockHandle;
 
 
 const DEFAULT_PKG_VERSION: u32 = 1;
@@ -162,7 +161,7 @@ impl ArchiveSlice {
         Ok(((package_id.package_id().id() as u64) << 32) | (self.archive_id as u64))
     }
 
-    pub async fn add_file<B, U256, PK>(&self, block_handle: Option<(&BlockIdExt, &BlockMeta)>, entry_id: &PackageEntryId<B, U256, PK>, data: Vec<u8>) -> Result<()>
+    pub async fn add_file<B, U256, PK>(&self, block_handle: Option<&BlockHandle>, entry_id: &PackageEntryId<B, U256, PK>, data: Vec<u8>) -> Result<()>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
@@ -195,8 +194,8 @@ impl ArchiveSlice {
     }
 
     pub async fn get_file<B, U256, PK>(
-        &self,
-        block_handle: Option<(&BlockIdExt, &BlockMeta)>,
+        &self, 
+        block_handle: Option<&BlockHandle>, 
         entry_id: &PackageEntryId<B, U256, PK>
     ) -> Result<PackageEntry>
     where

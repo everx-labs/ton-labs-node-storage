@@ -16,8 +16,6 @@ pub struct BlockMeta {
     fetched: AtomicBool,
     moving_to_archive_started: AtomicBool,
     temp_lock: RwLock<()>,
-    #[cfg(feature = "block_meta_test_counter")]
-    pub test_counter: AtomicU32,
 }
 
 impl BlockMeta {
@@ -30,8 +28,6 @@ impl BlockMeta {
             fetched: AtomicBool::new(fetched),
             moving_to_archive_started: AtomicBool::new(false),
             temp_lock: RwLock::new(()),
-            #[cfg(feature = "block_meta_test_counter")]
-            test_counter: AtomicU32::new(0),
         }
     }
 
@@ -58,14 +54,6 @@ impl BlockMeta {
     pub fn set_fetched(&self) -> bool {
         self.fetched.swap(true, Ordering::SeqCst)
     }
-
-    pub fn start_moving_to_archive(&self) -> bool {
-        self.moving_to_archive_started.swap(true, Ordering::SeqCst)
-    }
-
-    pub(crate) fn temp_lock(&self) -> &RwLock<()>  {
-        &self.temp_lock
-    }
 }
 
 impl Serializable for BlockMeta {
@@ -76,8 +64,6 @@ impl Serializable for BlockMeta {
         writer.write_all(&self.masterchain_ref_seq_no.load(Ordering::SeqCst).to_le_bytes())?;
         writer.write_all(&[self.fetched() as u8])?;
 
-        #[cfg(feature = "block_meta_test_counter")]
-        writer.write_all(&self.test_counter.load(Ordering::SeqCst).to_le_bytes())?;
 
         Ok(())
     }
@@ -90,10 +76,6 @@ impl Serializable for BlockMeta {
         let fetched = reader.read_byte()? != 0;
         let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, fetched);
 
-        #[cfg(feature = "block_meta_test_counter")] {
-            let test_counter = reader.read_le_u32().unwrap_or_default();
-            bm.test_counter.store(test_counter, Ordering::Relaxed);
-        }
 
         Ok(bm)
     }
