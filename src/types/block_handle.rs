@@ -152,7 +152,7 @@ impl BlockHandle {
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub fn proof_or_link_inited(&self, is_link: &mut bool) -> bool {
-        *is_link = !self.id.shard().is_masterchain();
+        *is_link = self.id.shard().is_masterchain();
         if *is_link {
             self.proof_link_inited()
         } else {
