@@ -148,12 +148,11 @@ impl ArchiveManager {
         Ok(())
     }
 
-    pub async fn get_archive_id(&self, mc_seq_no: u32) -> Result<Option<u64>> {
-        if let Some(fd) = self.get_file_desc(PackageId::for_block(mc_seq_no), false).await? {
+    pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
+        if let Some(fd) = self.file_maps.files().get_closest(mc_seq_no).await {
             fd.archive_slice().get_archive_id(mc_seq_no).await
-                .map(|id| Some(id))
         } else {
-            Ok(None)
+            None
         }
     }
 
@@ -221,7 +220,9 @@ impl ArchiveManager {
 
     async fn get_file_desc(&self, id: PackageId, force: bool) -> Result<Option<Arc<FileDescription>>> {
         // TODO: Rewrite logics in order to handle multithreaded adding of packages
-        if let Some(fd) = self.file_maps.get(id.package_type()).get(id.id()).await {
+        if let Some(fd) = self.file_maps.get(id.package_type())
+            .get(id.id()).await
+        {
             if fd.deleted() {
                 return Ok(None);
             }

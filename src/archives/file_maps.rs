@@ -100,10 +100,10 @@ impl FileMap {
             .ok()
     }
 
-    pub async fn get_closest(&self, package_id: u32) -> Option<Arc<FileDescription>> {
+    pub async fn get_closest(&self, mc_seq_no: u32) -> Option<Arc<FileDescription>> {
         let guard = self.elements.read().await;
         log::debug!(target: "storage", "Searching for file description (elements count = {})", guard.len());
-        match guard.binary_search_by(|entry| entry.key.cmp(&package_id)) {
+        match guard.binary_search_by(|entry| entry.key.cmp(&mc_seq_no)) {
             Ok(index) => Some(Arc::clone(&guard[index].value)),
             Err(index) => {
                 if index == 0 {

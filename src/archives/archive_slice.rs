@@ -152,13 +152,21 @@ impl ArchiveSlice {
         Ok(())
     }
 
-    pub async fn get_archive_id(&self, mc_seq_no: u32) -> Result<u64> {
+    pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
         if !self.sliced_mode {
-            return Ok(self.archive_id as u64);
+            return Some(self.archive_id as u64);
         }
 
-        let package_id = self.choose_package(mc_seq_no, false).await?;
-        Ok(((package_id.package_id().id() as u64) << 32) | (self.archive_id as u64))
+        if mc_seq_no >= self.archive_id {
+            let idx = (mc_seq_no - self.archive_id) / self.slice_size;
+            let package_count = self.packages.read().await.len() as u32;
+            if idx < package_count {
+                let package_id = self.archive_id + self.slice_size * idx;
+                return Some(((package_id as u64) << 32) | (self.archive_id as u64));
+            }
+        }
+
+        None
     }
 
     pub async fn add_file<B, U256, PK>(&self, block_handle: Option<&BlockHandle>, entry_id: &PackageEntryId<B, U256, PK>, data: Vec<u8>) -> Result<()>
@@ -219,12 +227,12 @@ impl ArchiveSlice {
     }
 
     pub async fn get_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
-        let archive_id = archive_id as u32;
-        if archive_id != self.archive_id {
-            fail!("Bad archive ID!");
+        if archive_id as u32 != self.archive_id {
+            fail!("Bad archive ID (archive_id = {}, expected {})!", archive_id as u32, self.archive_id);
         }
 
-        let package_info = self.choose_package(archive_id, false).await?;
+        let package_id = (archive_id >> 32) as u32;
+        let package_info = self.choose_package(package_id, false).await?;
         let mut file = File::open(&**package_info.package().path()).await?;
         let mut buffer = vec![0; limit as usize];
         file.seek(SeekFrom::Start(offset)).await?;

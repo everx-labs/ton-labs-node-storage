@@ -14,6 +14,7 @@ impl PackageInfo {
         Self { package_id, package, idx, version }
     }
 
+    #[allow(dead_code)]
     pub const fn package_id(&self) -> &PackageId {
         &self.package_id
     }
