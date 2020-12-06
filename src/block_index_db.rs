@@ -1,50 +1,40 @@
 use std::cmp::Ordering::{Greater, Less};
 use std::convert::TryInto;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use ton_block::{AccountIdPrefixFull, BlockIdExt, MAX_SPLIT_DEPTH, ShardIdent, UnixTime32};
 use ton_types::{fail, Result};
 
 use crate::lt_db::LtDb;
 use crate::lt_desc_db::LtDescDb;
-use crate::lt_shard_db::LtShardDb;
-use crate::status_db::StatusDb;
-use crate::types::{BlockHandle, LtDbEntry, LtDbKey, LtDbStatusEntry, LtDesc, ShardIdentKey, StatusKey};
+use crate::types::{BlockHandle, LtDbEntry, LtDbKey, LtDesc, ShardIdentKey};
 
 #[derive(Debug)]
 pub struct BlockIndexDb {
     lt_desc_db: RwLock<LtDescDb>,
     lt_db: LtDb,
-    lt_shard_db: LtShardDb,
-    status_db: Arc<StatusDb>,
 }
 
 impl BlockIndexDb {
-    pub fn with_dbs(lt_desc_db: LtDescDb, lt_db: LtDb, lt_shard_db: LtShardDb, status_db: Arc<StatusDb>) -> Self {
-        Self { lt_desc_db: RwLock::new(lt_desc_db), lt_db, lt_shard_db, status_db }
+    pub fn with_dbs(lt_desc_db: LtDescDb, lt_db: LtDb) -> Self {
+        Self { lt_desc_db: RwLock::new(lt_desc_db), lt_db }
     }
 
-    pub fn in_memory(status_db: Arc<StatusDb>) -> Self {
+    pub fn in_memory() -> Self {
         Self::with_dbs(
             LtDescDb::in_memory(),
             LtDb::in_memory(),
-            LtShardDb::in_memory(),
-            status_db,
         )
     }
 
     pub fn with_paths(
         lt_desc_db_path: impl AsRef<Path>,
         lt_db_path: impl AsRef<Path>,
-        lt_shard_db_path: impl AsRef<Path>,
-        status_db: Arc<StatusDb>
     ) -> Self {
         Self::with_dbs(
             LtDescDb::with_path(lt_desc_db_path),
             LtDb::with_path(lt_db_path),
-            LtShardDb::with_path(lt_shard_db_path),
-            status_db,
         )
     }
 
@@ -54,14 +44,6 @@ impl BlockIndexDb {
 
     pub const fn lt_db(&self) -> &LtDb {
         &self.lt_db
-    }
-
-    pub const fn lt_shard_db(&self) -> &LtShardDb {
-        &self.lt_shard_db
-    }
-
-    pub const fn status_db(&self) -> &Arc<StatusDb> {
-        &self.status_db
     }
 
     pub fn get_block_by_lt(&self, account_id: &AccountIdPrefixFull, lt: u64) -> Result<BlockIdExt> {
@@ -195,20 +177,18 @@ impl BlockIndexDb {
     pub fn add_handle(&self, handle: &BlockHandle) -> Result<()> {
         log::trace!(target: "storage", "BlockIndexDb::add_handle {}", handle.id());
         let desc_key = ShardIdentKey::new(handle.id().shard())?;
-        let mut shard_index = 0;
         let lt_desc_db_locked = self.lt_desc_db.write()
             .expect("Poisoned RwLock");
-        let (mut lt_desc, add_shard) = if let Some(lt_desc) = lt_desc_db_locked.try_get_value(&desc_key)? {
-            assert!(handle.id().seq_no() > lt_desc.last_seq_no(), "Block handles seq_no must be written in ascending order!");
-            (lt_desc, false)
-        } else {
-            if let Some(status) = self.status_db.try_get_value::<LtDbStatusEntry>(&StatusKey::LtDbStatus)? {
-                shard_index = status.total_shards();
+        let index = if let Some(lt_desc) = lt_desc_db_locked.try_get_value(&desc_key)? {
+            match handle.id().seq_no().cmp(&lt_desc.last_seq_no()) {
+                std::cmp::Ordering::Equal => return Ok(()),
+                std::cmp::Ordering::Less => fail!("Block handles seq_no must be written in the ascending order!"),
+                _ => lt_desc.last_index() + 1,
             }
-            (LtDesc::with_values(1, 0, 0, 0, 0), true)
+        } else {
+            1
         };
 
-        let index = lt_desc.last_index() + 1;
         let lt_key = LtDbKey::with_values(handle.id().shard(), index)?;
 
         let lt_entry = LtDbEntry::with_values(
@@ -219,8 +199,8 @@ impl BlockIndexDb {
 
         self.lt_db.put_value(&lt_key, &lt_entry)?;
 
-        lt_desc = LtDesc::with_values(
-            lt_desc.first_index(),
+        let lt_desc = LtDesc::with_values(
+            1,
             index,
             handle.id().seq_no(),
             handle.gen_lt(),
@@ -228,11 +208,6 @@ impl BlockIndexDb {
         );
 
         lt_desc_db_locked.put_value(&desc_key, &lt_desc)?;
-
-        if add_shard {
-            self.lt_shard_db.put_value(&shard_index.into(), handle.id().shard())?;
-            self.status_db.put_value(&StatusKey::LtDbStatus, LtDbStatusEntry::new(shard_index + 1))?;
-        }
 
         Ok(())
     }
