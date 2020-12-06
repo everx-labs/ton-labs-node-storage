@@ -4,7 +4,7 @@ use crate::db::traits::DbKey;
 
 #[derive(Debug, AsRefStr)]
 pub enum StatusKey {
-    LtDbStatus,
+    // TODO: Reserved for DynamicBocDb
 }
 
 impl DbKey for StatusKey {

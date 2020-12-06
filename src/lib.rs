@@ -12,7 +12,6 @@ pub mod dynamic_boc_diff_writer;
 pub mod error;
 pub mod lt_db;
 pub mod lt_desc_db;
-pub mod lt_shard_db;
 pub mod node_state_db;
 pub mod shardstate_db;
 pub mod shardstate_persistent_db;
