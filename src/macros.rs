@@ -3,7 +3,7 @@ macro_rules! db_impl_base {
     ($type: ident, $trait: ident, $key_type: ty) => {
         #[derive(Debug)]
         pub struct $type {
-            db: Box<dyn crate::db::traits::$trait<$key_type> + Send + Sync>,
+            db: Box<dyn $crate::db::traits::$trait<$key_type> + Send + Sync>,
         }
 
         impl $type{
@@ -11,7 +11,7 @@ macro_rules! db_impl_base {
             #[allow(dead_code)]
             pub fn in_memory() -> Self {
                 Self {
-                    db: Box::new(crate::db::memorydb::MemoryDb::new())
+                    db: Box::new($crate::db::memorydb::MemoryDb::new())
                 }
             }
 
@@ -19,7 +19,7 @@ macro_rules! db_impl_base {
             #[allow(dead_code)]
             pub fn with_path<P: AsRef<std::path::Path>>(path: P) -> Self {
                 Self {
-                    db: Box::new(crate::db::rocksdb::RocksDb::with_path(path))
+                    db: Box::new($crate::db::rocksdb::RocksDb::with_path(path))
                 }
             }
         }
