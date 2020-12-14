@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::RwLock;
-use ton_block::{BlockIdExt, BlockInfo, Block};
+use ton_block::{BlockIdExt, BlockInfo, ShardStateUnsplit, Block};
 use ton_types::{fail, Result};
 
 use crate::block_handle_db::BlockHandleCache;
@@ -53,7 +53,14 @@ impl BlockHandle {
         self.meta.serialize(writer)
     }
 
-    // This flags might be set into true only. So flush only after transform false -> true.
+    pub fn fetch_shard_state(&self, ss: &ShardStateUnsplit) -> Result<()> {
+        self.meta.gen_utime().store(ss.gen_time(), Ordering::SeqCst);
+        if ss.read_custom()?.map(|c| c.after_key_block).unwrap_or(false) {
+            self.set_flags(FLAG_KEY_BLOCK);
+        }
+        self.meta.set_fetched();
+        Ok(())
+    }
 
     fn fetch_info(&self, info: &BlockInfo) -> Result<()> {
         self.meta.gen_utime().store(info.gen_utime().0, Ordering::SeqCst);
@@ -67,6 +74,8 @@ impl BlockHandle {
     pub fn fetch_block_info(&self, block: &Block) -> Result<()> {
         self.fetch_info(&block.read_info()?)
     }
+
+    // This flags might be set into true only. So flush only after transform false -> true.
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub fn set_data_inited(&self) -> bool {
